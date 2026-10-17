@@ -21,7 +21,16 @@ Range 分片（8–16 并发），请求头（cookie/UA/Referer）完全由中�
 **不依赖 Gopeed 及其扩展**。Gopeed 的夸克直链下载常常因为缺扩展/丢请求头直接
 `status=error`，而失败原因又不透明。
 
-`RELAY_DOWNLOAD_ENGINE=gopeed` 保留原实现（Gopeed 多连接），仅作对照 / 回退。
+`RELAY_DOWNLOAD_ENGINE=gopeed`（0.4.0 起推荐用于夸克源）走 Gopeed + 夸克扩展：
+
+- 中继启动时自动下载并安装扩展 **igwkang/gopeed-extension-quark**（devMode 文件夹方式），
+  并把 `QUARK_COOKIE` 写进扩展设置（`QUARK_EXT_AUTO=1` 控制，失败只记日志不影响启动）；
+- 任务 URL 用扩展支持的网盘目录链接 `https://pan.quark.cn/list#/list/all/{file_id}`，
+  **中继不再解析直链**，cookie / UA / stoken 全由扩展内部处理；
+- 插件若直接给出 `source_url`（分享链接），中继原样透传给扩展。
+
+对照接口：`POST /debug/gopeed/install-quark`（手动重装扩展+写 cookie）、
+`GET|POST /debug/gopeed/proxy`（透传 `/api/v1/*`，用于远程查扩展列表与设置）。
 
 内置引擎行为：先 `Range: bytes=0-0` 探总大小与分段能力 → 按 8 MB 分片并发拉取 →
 `os.pwrite` 按偏移写入 → 校验总大小与 SHA1；403/404 会直接抛成「直链返回 403（cookie 失效或请求头不够）」
@@ -72,6 +81,8 @@ docker compose logs --tail=50 relay
 | `GET /debug/logs?lines=200` | 最近日志（环形缓冲，含 `[access]` 访问日志与任务起止/失败原因） |
 | `GET /debug/selfcheck` | 自检：磁盘写 1 MB、Gopeed `/api/v1/info`、三项凭证是否配置 |
 | `POST /debug/resolve` | 传 `{"file_id":"..."}`：解析夸克直链并真取 64 KB，回报域名/状态码/字节数（不回直链与 cookie） |
+| `POST /debug/gopeed/install-quark` | 下载/安装夸克扩展并把 `QUARK_COOKIE` 写进扩展设置 |
+| `GET /debug/gopeed/proxy?path=/api/v1/extensions` | 透传读 Gopeed 接口（远程排查扩展/任务） |
 
 `/debug/*` 不返回 cookie、直链、令牌；访问日志会记录每个请求（401 也记）。
 
