@@ -197,9 +197,6 @@ def make_handler(config: Config, manager: JobManager):
                 })
             if not self._authorized():
                 return _json(self, 401, {"error": "unauthorized"})
-            if path == "/debug/gopeed/test":
-                # GET 分支实现，POST 也放行（curl -d 默认 POST）
-                return self.do_GET()
             if path == "/jobs":
                 return _json(self, 200, {"jobs": manager.list()})
             if path.startswith("/jobs/"):
@@ -278,6 +275,9 @@ def make_handler(config: Config, manager: JobManager):
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if not self._authorized():
                 return _json(self, 401, {"error": "unauthorized"})
+            if path == "/debug/gopeed/test":
+                # 实现在 do_GET 分支；curl -d 默认 POST，这里转发
+                return self.do_GET()
             if path == "/jobs":
                 try:
                     payload = self._body()
