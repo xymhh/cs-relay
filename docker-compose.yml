@@ -20,15 +20,20 @@ services:
 
   gopeed:
     image: liwei2633/gopeed:latest
-    container_name: cs-gopeed
+    container_name: gopeed
     restart: unless-stopped
     environment:
-      - PUID=0
-      - PGID=0
-      - UMASK=022
+      PUID: 0
+      PGID: 0
+      UMASK: "022"
+      GOPEED_USERNAME: ${GOPEED_USERNAME:-xymhh}
+      GOPEED_PASSWORD: ${GOPEED_PASSWORD:?set GOPEED_PASSWORD in .env}
+      GOPEED_APITOKEN: ${GOPEED_APITOKEN:?set GOPEED_APITOKEN in .env}
+      GOPEED_STORAGEDIR: /app/storage
     volumes:
-      - ./data:/data
-    # 只在内网可达；不映射到宿主机，避免暴露下载器 UI
+      - ./downloads:/app/Downloads
+      - ./storage:/app/storage
+    # 只走内网，不映射到宿主机：下载器 UI 不对外暴露
     expose:
       - "9999"
     logging:

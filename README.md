@@ -55,6 +55,10 @@ docker compose logs --tail=50 relay
 
 `healthz` 返回 `{"ok": true, ...}` 即可。第一次任务前建议先跑一次 1 GB 级小文件验证 115 上传。
 
+Gopeed 容器（`liwei2633/gopeed`）用 `./downloads:/app/Downloads` + `./storage:/app/storage`，
+凭据从 `.env` 注入：`GOPEED_USERNAME` / `GOPEED_PASSWORD` / `GOPEED_APITOKEN`，
+其中 `GOPEED_TOKEN`（中继调用用）必须与 `GOPEED_APITOKEN` 填同一个值。
+
 ### 升级（部署目录 `/opt/csrelay`，一条命令）
 
 ```bash
