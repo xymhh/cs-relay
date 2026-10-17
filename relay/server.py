@@ -27,7 +27,7 @@ from .jobs import JobManager
 from .quark import QuarkError, load_cookie, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -346,17 +346,18 @@ def make_handler(config: Config, manager: JobManager):
                     url, resolved_headers = resolve_download_link(cookie, file_id)
                 except QuarkError as error:
                     return _json(self, 502, {"error": str(error)[:300]})
+                used = str(resolved_headers.get("cookie") or cookie)
                 ua = (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
                     "Safari/537.36"
                 )
                 variants = {
-                    "min": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/"},
-                    "range": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/", "range": "bytes=0-1023"},
-                    "accept_all": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/", "accept": "*/*"},
+                    "min": {"user-agent": ua, "cookie": used, "referer": "https://pan.quark.cn/"},
+                    "range": {"user-agent": ua, "cookie": used, "referer": "https://pan.quark.cn/", "range": "bytes=0-1023"},
+                    "accept_all": {"user-agent": ua, "cookie": used, "referer": "https://pan.quark.cn/", "accept": "*/*"},
                     "ua_only": {"user-agent": ua, "referer": "https://pan.quark.cn/"},
-                    "cookie_only": {"cookie": cookie, "referer": "https://pan.quark.cn/"},
+                    "cookie_only": {"cookie": used, "referer": "https://pan.quark.cn/"},
                 }
                 results = {}
                 for label, headers in variants.items():
@@ -369,7 +370,6 @@ def make_handler(config: Config, manager: JobManager):
                         results[label] = {"error": type(error).__name__}
                 from urllib.parse import parse_qs, urlparse
                 query = parse_qs(urlparse(url).query)
-                used = str(resolved_headers.get("cookie") or cookie)
                 return _json(self, 200, {
                     "url_length": len(url),
                     "param_keys": sorted(query.keys()),
