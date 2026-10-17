@@ -212,11 +212,10 @@ class JobManager:
             if payload["provider"] != "quark":
                 raise ValueError(f"暂不支持源网盘：{payload['provider']}")
             engine = str(getattr(self.config, "download_engine", "builtin") or "builtin").lower()
-            if engine == "gopeed" and not source_url and payload.get("file_id"):
-                # 插件转存后文件在用户自己的夸克网盘里：走扩展支持的网盘目录链接，
-                # 由扩展自己带 cookie 取直链（中继不碰 dlink，避免 UA/Referer 丢头）
-                source_url = f"https://pan.quark.cn/list#/list/all/{payload['file_id']}"
-            if source_url and engine == "gopeed":
+            # 注意：夸克扩展的 list 链接只认「目录 fid」，传单个文件 fid 会立刻
+            # status=error（扩展按目录 file/sort 列表，文件 fid 不是目录）。
+            # 所以单文件仍由中继解析直链，Gopeed 只当多连接下载器用。
+            if source_url and engine == "gopeed" and "/s/" in source_url:
                 # 交给 Gopeed 的夸克扩展解析：中继不碰直链，扩展自己带 cookie
                 url, headers = source_url, {}
                 logbuf.log(f"[job] {job_id} 交给扩展解析：{source_url.split('?')[0][:120]}")

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -213,6 +214,44 @@ def make_handler(config: Config, manager: JobManager):
                 return _json(self, 200, {"lines": logbuf.tail(lines)})
             if path == "/debug/selfcheck":
                 return _json(self, 200, _debug_selfcheck(config))
+            if path == "/debug/gopeed/test":
+                # 用真实 file_id 走一遍「中继解析直链 → Gopeed 多连接下载」，
+                # 8 秒后回报 status/速度/错误原文，测完删任务避免占盘。
+                try:
+                    payload = self._body()
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)})
+                file_id = str(payload.get("file_id") or "").strip()
+                if not file_id:
+                    return _json(self, 400, {"error": "file_id 不能为空"})
+                try:
+                    url, headers = resolve_download_link(config.quark_cookie, file_id)
+                    gopeed = GopeedClient(config.gopeed_url, config.gopeed_token)
+                    task_id = gopeed.create_task(
+                        url, headers, "/data/gopeed-test",
+                        str(payload.get("name") or "probe.bin"),
+                        connections=min(config.gopeed_connections or 8, 16),
+                    )
+                except (QuarkError, GopeedError) as error:
+                    return _json(self, 502, {"error": str(error)[:400]})
+                time.sleep(8)
+                try:
+                    task = gopeed.get_task(task_id)
+                except GopeedError as error:
+                    task = {"error": str(error)[:300]}
+                progress = task.get("progress") if isinstance(task.get("progress"), dict) else {}
+                result = {
+                    "task": task_id,
+                    "status": task.get("status"),
+                    "downloaded": progress.get("downloaded"),
+                    "length": progress.get("length"),
+                    "error": str(task.get("error") or "")[:300],
+                }
+                try:
+                    gopeed.delete_task(task_id, force=True)
+                except GopeedError:
+                    pass
+                return _json(self, 200, result)
             if path == "/debug/gopeed/install-quark":
                 status = ensure_quark_extension(
                     GopeedClient(config.gopeed_url, config.gopeed_token),
