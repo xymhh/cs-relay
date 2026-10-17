@@ -59,9 +59,11 @@ def resolve_download_link(
     last_message = ""
     for base_url, params in ((BASE_URL, None), (SHARE_BASE_URL, DOWNLOAD_PARAMS)):
         try:
+            # 参数必须与 Gopeed 扩展完全一致：pr=ucpro&fr=pc。
+            # 多带 uc_param_str/__t 时返回的直链签名会被 CDN 判 412（实测 262 字节）。
             response = requests.post(
                 f"{base_url}/file/download",
-                params=_params(params),
+                params={"pr": "ucpro", "fr": "pc"},
                 json={"fids": [str(file_id)]},
                 headers=headers,
                 timeout=timeout,
