@@ -1,15 +1,30 @@
-"""HTTP 接口（stdlib，无框架）：/healthz、/jobs。"""
+"""HTTP 接口（stdlib，无框架）：/healthz、/jobs、/debug/*。
+
+`/debug/*` 全部要求 X-Token（与 /jobs 同一枚令牌），用于「像调试本地服务一样
+远程调试中继」：读最近日志、看配置是否真正生效、验证夸克直链、跑自检。
+
+设计约束：
+- 永不返回 cookie / 直链（只回域名、长度、请求头键名）；
+- 自检里的磁盘探测只写 1 MB 临时文件，用完立即删除；
+- 所有请求一行访问日志，401 也留痕。
+"""
 
 from __future__ import annotations
 
 import json
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
+import requests
+
+from . import logbuf
 from .config import Config
+from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
+from .quark import QuarkError, resolve_download_link
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -21,6 +36,111 @@ def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
     handler.wfile.write(body)
 
 
+def _host_of(url: str) -> str:
+    try:
+        return str(url).split("/")[2]
+    except IndexError:
+        return "?"
+
+
+def _debug_status(config: Config, manager: JobManager) -> dict:
+    usage = shutil.disk_usage(str(config.data_dir))
+    jobs = manager.list()
+    recent = sorted(jobs, key=lambda job: float(job.get("created_at") or 0))[-5:]
+    return {
+        "ok": True,
+        "version": VERSION,
+        "disk_free_gb": round(usage.free / 1024 ** 3, 1),
+        "disk_total_gb": round(usage.total / 1024 ** 3, 1),
+        "config": {
+            "gopeed_url": config.gopeed_url,
+            "gopeed_token_configured": bool(config.gopeed_token),
+            "gopeed_connections": config.gopeed_connections,
+            "quark_cookie_configured": bool(config.quark_cookie),
+            "p115_cookie_configured": bool(config.p115_cookie),
+            "max_file_bytes": config.max_file_bytes,
+            "job_timeout_seconds": config.job_timeout,
+            "data_dir": str(config.data_dir),
+        },
+        "jobs": {
+            "total": len(jobs),
+            "running": sum(1 for job in jobs if job.get("status") == "running"),
+            "failed": sum(1 for job in jobs if job.get("status") == "failed"),
+            "recent": [
+                {
+                    "id": job.get("id"),
+                    "status": job.get("status"),
+                    "phase": job.get("phase"),
+                    "error": str(job.get("error") or "")[:200],
+                    "file_name": (job.get("payload") or {}).get("file_name"),
+                }
+                for job in recent
+            ],
+        },
+    }
+
+
+def _debug_selfcheck(config: Config) -> dict:
+    checks: dict = {}
+
+    # 1) 磁盘：写入 1 MB 再删，验证容器可写 + 剩余空间
+    try:
+        probe = Path(config.data_dir) / ".relay_write_probe"
+        probe.write_bytes(b"\0" * 1024 * 1024)
+        written = probe.stat().st_size
+        probe.unlink()
+        usage = shutil.disk_usage(str(config.data_dir))
+        checks["disk"] = {
+            "ok": written == 1024 * 1024,
+            "free_gb": round(usage.free / 1024 ** 3, 1),
+        }
+    except OSError as error:
+        checks["disk"] = {"ok": False, "error": str(error)[:300]}
+
+    # 2) Gopeed：读 /api/v1/info（不创建任务）
+    try:
+        info = GopeedClient(config.gopeed_url, config.gopeed_token).info()
+        checks["gopeed"] = {"ok": True, "info": info}
+    except GopeedError as error:
+        checks["gopeed"] = {"ok": False, "error": str(error)[:300]}
+
+    # 3) 凭证是否配置（只报有无，不回报内容）
+    checks["credentials"] = {
+        "quark_cookie": bool(config.quark_cookie),
+        "p115_cookie": bool(config.p115_cookie),
+        "gopeed_token": bool(config.gopeed_token),
+    }
+    return {"ok": all(bool(v.get("ok")) for k, v in checks.items() if isinstance(v, dict)),
+            "version": VERSION, "checks": checks}
+
+
+def _debug_resolve(config: Config, payload: dict) -> dict:
+    """解析夸克直链并真的取 64 KB：验证「链接有效 + 请求头够用」。"""
+    file_id = str(payload.get("file_id") or "").strip()
+    if not file_id:
+        raise ValueError("file_id 不能为空")
+    url, headers = resolve_download_link(config.quark_cookie, file_id)
+    result = {
+        "host": _host_of(url),
+        "url_length": len(url),
+        "header_keys": sorted(headers),
+        "status": None,
+        "bytes": 0,
+        "error": "",
+    }
+    try:
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        result["status"] = response.status_code
+        try:
+            chunk = next(response.iter_content(64 * 1024), b"")
+            result["bytes"] = len(chunk or b"")
+        finally:
+            response.close()
+    except requests.RequestException as error:
+        result["error"] = str(error)[:300]
+    return result
+
+
 def make_handler(config: Config, manager: JobManager):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"cs-relay/{VERSION}"
@@ -28,7 +148,7 @@ def make_handler(config: Config, manager: JobManager):
         def log_message(self, fmt, *args):  # noqa: A003 - 保持 stdlib 签名
             # 访问日志：插件到底有没有连过来只能靠这一行判断，
             # 401（令牌不匹配）也要留下痕迹，否则外部看起来「完全没有日志」。
-            print(f"[access] {self.address_string()} {fmt % args}", flush=True)
+            logbuf.log(f"[access] {self.address_string()} {fmt % args}")
 
         def _authorized(self) -> bool:
             token = str(self.headers.get("X-Token") or "")
@@ -50,6 +170,16 @@ def make_handler(config: Config, manager: JobManager):
                 raise ValueError("请求体必须是 JSON 对象")
             return payload
 
+        def _query(self, key: str, default: str = "") -> str:
+            if "?" not in self.path:
+                return default
+            query = self.path.split("?", 1)[1]
+            for part in query.split("&"):
+                name, _, value = part.partition("=")
+                if name == key:
+                    return value
+            return default
+
         def do_GET(self):  # noqa: N802 - stdlib 约定
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if path == "/healthz":
@@ -68,22 +198,39 @@ def make_handler(config: Config, manager: JobManager):
                 if not job:
                     return _json(self, 404, {"error": "job not found"})
                 return _json(self, 200, job)
+            if path == "/debug/status":
+                return _json(self, 200, _debug_status(config, manager))
+            if path == "/debug/logs":
+                try:
+                    lines = int(self._query("lines", "200") or 200)
+                except ValueError:
+                    lines = 200
+                return _json(self, 200, {"lines": logbuf.tail(lines)})
+            if path == "/debug/selfcheck":
+                return _json(self, 200, _debug_selfcheck(config))
             return _json(self, 404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if not self._authorized():
                 return _json(self, 401, {"error": "unauthorized"})
-            if path != "/jobs":
-                return _json(self, 404, {"error": "not found"})
-            try:
-                payload = self._body()
-                job = manager.submit(payload)
-            except ValueError as error:
-                return _json(self, 400, {"error": str(error)})
-            except Exception as error:  # noqa: BLE001
-                return _json(self, 500, {"error": str(error)[:300]})
-            return _json(self, 202, job)
+            if path == "/jobs":
+                try:
+                    payload = self._body()
+                    job = manager.submit(payload)
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)})
+                except Exception as error:  # noqa: BLE001
+                    return _json(self, 500, {"error": str(error)[:300]})
+                return _json(self, 202, job)
+            if path == "/debug/resolve":
+                try:
+                    return _json(self, 200, _debug_resolve(config, self._body()))
+                except (ValueError, QuarkError) as error:
+                    return _json(self, 400, {"error": str(error)[:300]})
+                except Exception as error:  # noqa: BLE001
+                    return _json(self, 500, {"error": str(error)[:300]})
+            return _json(self, 404, {"error": "not found"})
 
         def do_DELETE(self):  # noqa: N802
             path = self.path.split("?", 1)[0].rstrip("/") or "/"

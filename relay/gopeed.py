@@ -59,6 +59,11 @@ class GopeedClient:
             raise GopeedError("Gopeed 未返回任务 ID")
         return task_id
 
+    def info(self) -> dict:
+        """读 Gopeed 版本信息（自检用，不创建任务）。"""
+        data = self._request("GET", "/api/v1/info").get("data")
+        return data if isinstance(data, dict) else {}
+
     def get_task(self, task_id: str) -> dict:
         data = self._request("GET", f"/api/v1/tasks/{task_id}").get("data")
         return data if isinstance(data, dict) else {}

@@ -197,5 +197,90 @@ class ServerTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class DebugApiTest(unittest.TestCase):
+    """调试接口：令牌保护、只回脱敏信息、日志可远程读。"""
+
+    def setUp(self):
+        from http.server import ThreadingHTTPServer
+
+        from relay import logbuf
+        from relay.server import make_handler
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = make_config(self.tmp)
+        # 指向必然连不上的地址，避免自检真的打网络
+        self.cfg = Config(
+            **{**self.cfg.__dict__, "gopeed_url": "http://127.0.0.1:1"}
+        )
+        manager = JobManager(
+            self.cfg, resolver=lambda *a: ("", {}),
+            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
+        )
+        logbuf.log("[test] debug api ready")
+        self.httpd = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.cfg, manager)
+        )
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        import shutil
+
+        self.httpd.shutdown()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _get(self, path: str, token: str | None = "t0ken"):
+        import urllib.request
+
+        headers = {"X-Token": token} if token else {}
+        request = urllib.request.Request(f"{self.base}{path}", headers=headers)
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+
+    def test_debug_requires_token(self):
+        import urllib.error
+        import urllib.request
+
+        for path in ("/debug/status", "/debug/logs", "/debug/selfcheck"):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(f"{self.base}{path}")
+            self.assertEqual(ctx.exception.code, 401)
+
+    def test_status_masks_secrets(self):
+        payload = self._get("/debug/status")
+        self.assertTrue(payload["ok"])
+        config = payload["config"]
+        self.assertTrue(config["quark_cookie_configured"])
+        self.assertTrue(config["p115_cookie_configured"])
+        text = json.dumps(payload)
+        self.assertNotIn("quark=1", text)
+        self.assertNotIn("uid=1", text)
+        self.assertIn("jobs", payload)
+
+    def test_logs_tail(self):
+        payload = self._get("/debug/logs?lines=50")
+        self.assertTrue(any("debug api ready" in line for line in payload["lines"]))
+
+    def test_selfcheck_reports_gopeed_failure_without_raising(self):
+        payload = self._get("/debug/selfcheck")
+        self.assertIn("checks", payload)
+        self.assertTrue(payload["checks"]["disk"]["ok"])
+        self.assertFalse(payload["checks"]["gopeed"]["ok"])
+
+    def test_resolve_requires_file_id(self):
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"{self.base}/debug/resolve", method="POST",
+            data=json.dumps({}).encode(), headers={
+                "X-Token": "t0ken", "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request)
+        self.assertEqual(ctx.exception.code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

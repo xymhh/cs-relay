@@ -50,6 +50,17 @@ docker compose logs --tail=50 relay
 - `GET /jobs/{id}`：`status` ∈ queued/running/success/failed/cancelled，`phase` ∈ resolve/download/upload/done，附 `progress/transferred/speed`
 - `DELETE /jobs/{id}`：取消（在下载阶段生效）
 
+### 调试接口（`X-Token`，只回脱敏信息）
+
+| 接口 | 作用 |
+| --- | --- |
+| `GET /debug/status` | 版本、磁盘剩余、配置是否真的生效（cookie/token 只报有无）、最近 5 个任务 |
+| `GET /debug/logs?lines=200` | 最近日志（环形缓冲，含 `[access]` 访问日志与任务起止/失败原因） |
+| `GET /debug/selfcheck` | 自检：磁盘写 1 MB、Gopeed `/api/v1/info`、三项凭证是否配置 |
+| `POST /debug/resolve` | 传 `{"file_id":"..."}`：解析夸克直链并真取 64 KB，回报域名/状态码/字节数（不回直链与 cookie） |
+
+`/debug/*` 不返回 cookie、直链、令牌；访问日志会记录每个请求（401 也记）。
+
 ## 运维
 
 ```bash

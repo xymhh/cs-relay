@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from . import logbuf
 from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .p115 import P115Error, Uploader
@@ -192,6 +193,9 @@ class JobManager:
         job_dir.mkdir(parents=True, exist_ok=True)
         gopeed_task = ""
         started = _now()
+        logbuf.log(
+            f"[job] {job_id} 开始：{name} {size} 字节 -> {payload['target']['path']}"
+        )
         self._update(
             job_id, status="running", phase="resolve", progress=2,
             message="正在解析源网盘直链", started_at=started,
@@ -207,9 +211,8 @@ class JobManager:
                 host = url.split("/")[2]
             except IndexError:
                 host = "?"
-            print(
-                f"[job] {job_id} 直链 host={host} header_keys={sorted(headers)}",
-                flush=True,
+            logbuf.log(
+                f"[job] {job_id} 直链 host={host} header_keys={sorted(headers)}"
             )
             if self._is_cancelled(job_id):
                 raise GopeedError("任务已取消")
@@ -278,6 +281,7 @@ class JobManager:
                 finished_at=_now(),
             )
         except (QuarkError, GopeedError, P115Error, ValueError, OSError) as error:
+            logbuf.log(f"[job] {job_id} 失败：{str(error)[:300]}")
             cancelled = self._is_cancelled(job_id)
             self._update(
                 job_id,
