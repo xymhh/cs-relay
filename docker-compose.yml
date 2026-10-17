@@ -19,7 +19,7 @@ services:
         max-file: "3"
 
   gopeed:
-    image: gopeedlab/gopeed:latest
+    image: liwei2633/gopeed:latest
     container_name: cs-gopeed
     restart: unless-stopped
     volumes:
