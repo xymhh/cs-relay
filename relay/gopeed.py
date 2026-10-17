@@ -96,7 +96,15 @@ class GopeedClient:
             if status == "done":
                 return task
             if status in {"error", "pause", "removed"}:
-                raise GopeedError(f"Gopeed 任务未完成：status={status}")
+                # 把 Gopeed 自带的失败原因一起抛出去：status=error 本身无法判断
+                # 是 403（直链/请求头被丢）、磁盘权限还是链接失效。
+                detail = str(task.get("error") or task.get("msg") or "").strip()
+                downloaded = f"，已下载 {done}/{total}" if total else ""
+                raise GopeedError(
+                    f"Gopeed 任务未完成：status={status}"
+                    + (f"，原因={detail[:300]}" if detail else "，无错误详情")
+                    + downloaded
+                )
             if stall_timeout > 0 and time.monotonic() - last_progress_at > stall_timeout:
                 raise GopeedError(f"Gopeed 下载停滞超过 {int(stall_timeout)} 秒")
             time.sleep(interval)

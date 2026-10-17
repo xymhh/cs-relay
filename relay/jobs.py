@@ -200,6 +200,17 @@ class JobManager:
             if payload["provider"] != "quark":
                 raise ValueError(f"暂不支持源网盘：{payload['provider']}")
             url, headers = self._resolver(self.config.quark_cookie, payload["file_id"])
+            # 只打域名和请求头键名（绝不打 cookie/直链令牌），用于判断
+            # Gopeed 拿到的到底是什么；403 时靠这一行区分「没带 cookie」还是「链接失效」
+            host = ""
+            try:
+                host = url.split("/")[2]
+            except IndexError:
+                host = "?"
+            print(
+                f"[job] {job_id} 直链 host={host} header_keys={sorted(headers)}",
+                flush=True,
+            )
             if self._is_cancelled(job_id):
                 raise GopeedError("任务已取消")
             self._update(
