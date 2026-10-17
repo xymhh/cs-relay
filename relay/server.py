@@ -26,7 +26,9 @@ def make_handler(config: Config, manager: JobManager):
         server_version = f"cs-relay/{VERSION}"
 
         def log_message(self, fmt, *args):  # noqa: A003 - 保持 stdlib 签名
-            return
+            # 访问日志：插件到底有没有连过来只能靠这一行判断，
+            # 401（令牌不匹配）也要留下痕迹，否则外部看起来「完全没有日志」。
+            print(f"[access] {self.address_string()} {fmt % args}", flush=True)
 
         def _authorized(self) -> bool:
             token = str(self.headers.get("X-Token") or "")
