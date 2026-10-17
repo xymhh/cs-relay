@@ -1,4 +1,4 @@
-"""夸克网盘：按文件 id 取下载直链（PC 客户端 UA 通道）。
+"""夸克网盘：按文件 id 取下载直链（对齐插件 drive/quark/files.py 的做法）。
 
 只做中继真正需要的一件事：fid -> (download_url, headers)。
 夸克对下载按 UA 分级限速，网页 UA 即使多连接也上不去，故优先 PC 客户端 UA。
@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -19,6 +20,10 @@ DESKTOP_UA = (
     "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
     "Safari/537.36"
 )
+WEB_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 DEFAULT_HEADERS = {
     "user-agent": DESKTOP_UA,
     "referer": "https://pan.quark.cn/",
@@ -27,6 +32,7 @@ DEFAULT_HEADERS = {
     "accept-language": "zh-CN,zh;q=0.9",
 }
 DOWNLOAD_PARAMS = {"sys": "win32", "ve": "2.5.20", "ut": "", "guid": ""}
+COOKIE_KEYS = ("__puus", "__pus")
 
 
 class QuarkError(RuntimeError):
@@ -34,7 +40,13 @@ class QuarkError(RuntimeError):
 
 
 def _params(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    params = {"pr": "ucpro", "fr": "pc", "uc_param_str": "", "__t": int(time.time() * 1000)}
+    params: dict[str, Any] = {
+        "pr": "ucpro",
+        "fr": "pc",
+        "uc_param_str": "",
+        "__t": int(time.time() * 1000),
+        "__dt": random.randint(100, 9999),
+    }
     if extra:
         params.update(extra)
     return params
@@ -46,42 +58,40 @@ def _data(payload: Any) -> Any:
     return payload.get("data") or {}
 
 
+def _merge_cookies(cookie: str, session: requests.Session) -> str:
+    """把 session 里 rolling 下发的 __puus/__pus 合并回 cookie 串。"""
+    jar = {c.name: c.value for c in session.cookies}
+    if not any(jar.get(k) for k in COOKIE_KEYS):
+        return cookie
+    parts = [p.strip() for p in cookie.split(";") if p.strip()]
+    merged = dict(p.split("=", 1) for p in parts if "=" in p)
+    for key in COOKIE_KEYS:
+        if jar.get(key):
+            merged[key] = jar[key]
+    return "; ".join(f"{k}={v}" for k, v in merged.items())
+
+
 def refresh_cookie(cookie: str, timeout: int = 15) -> str:
     """用一次轻量 API 请求刷新 __puus。
 
     夸克把会话令牌放在 Set-Cookie 的 __puus 里滚动下发；.env/扩展设置里的那份
-    很快过期，过期后 /file/download 仍返回直链，但 CDN 一律 412（262 字节）。
-    只要把响应里的新 __puus 覆盖回 cookie 就能继续用。
+    很快过期，过期后 /file/download 可能直接 404/412。
     """
     if not cookie:
         return cookie
-    cookie = refresh_cookie(cookie)
+    session = requests.Session()
     headers = dict(DEFAULT_HEADERS)
     headers["cookie"] = cookie
     try:
-        response = requests.get(
+        session.get(
             f"{BASE_URL}/member",
-            params={"pr": "ucpro", "fr": "pc"},
+            params=_params(),
             headers=headers,
             timeout=timeout,
         )
     except requests.RequestException:
         return cookie
-    raw = response.headers.get("set-cookie") or ""
-    parts = [p.strip() for p in raw.split(",") if "__puus=" in p]
-    if not parts:
-        return cookie
-    new_puus = parts[-1].split(";")[0].strip()
-    if not new_puus.startswith("__puus="):
-        return cookie
-    cookie_parts = [p.strip() for p in cookie.split(";") if p.strip()]
-    for index, part in enumerate(cookie_parts):
-        if part.startswith("__puus="):
-            cookie_parts[index] = new_puus
-            break
-    else:
-        cookie_parts.append(new_puus)
-    return "; ".join(cookie_parts)
+    return _merge_cookies(cookie, session)
 
 
 def resolve_download_link(
@@ -92,46 +102,50 @@ def resolve_download_link(
         raise QuarkError("夸克 cookie 未配置")
     if not file_id:
         raise QuarkError("夸克文件 id 为空")
-    headers = dict(DEFAULT_HEADERS)
-    headers["cookie"] = cookie
+
+    session = requests.Session()
+    cookie = refresh_cookie(cookie, timeout=timeout) or cookie
     last_message = ""
-    for base_url, params in ((BASE_URL, None), (SHARE_BASE_URL, DOWNLOAD_PARAMS)):
+    for channel, base_url, params, ua in (
+            ("drive-pc/PC-UA", BASE_URL, None, DESKTOP_UA),
+            ("drive/PC-UA", SHARE_BASE_URL, DOWNLOAD_PARAMS, DESKTOP_UA),
+            ("drive/网页-UA", SHARE_BASE_URL, DOWNLOAD_PARAMS, WEB_UA),
+    ):
+        headers = dict(DEFAULT_HEADERS)
+        headers["cookie"] = cookie
+        headers["user-agent"] = ua
         try:
-            # 参数必须与 Gopeed 扩展完全一致：pr=ucpro&fr=pc。
-            # 多带 uc_param_str/__t 时返回的直链签名会被 CDN 判 412（实测 262 字节）。
-            response = requests.post(
+            response = session.post(
                 f"{base_url}/file/download",
-                params={"pr": "ucpro", "fr": "pc"},
+                params=_params(params),
                 json={"fids": [str(file_id)]},
                 headers=headers,
                 timeout=timeout,
             )
         except requests.RequestException as error:
-            last_message = f"请求异常：{error}"
+            last_message = f"{channel} 请求异常：{error}"
             continue
+        cookie = _merge_cookies(cookie, session)
         if response.status_code >= 400:
-            last_message = f"HTTP {response.status_code}"
+            last_message = f"{channel} HTTP {response.status_code}"
             continue
         try:
             payload = response.json()
         except ValueError:
-            last_message = "返回非 JSON"
+            last_message = f"{channel} 返回非 JSON"
             continue
         items = _data(payload)
         entry = items[0] if isinstance(items, list) and items else {}
         url = str((entry or {}).get("download_url") or "")
         if url:
-            # 直链只认最小请求头：UA + Cookie + Referer。
-            # 带上 accept/origin/accept-language 会被夸克 CDN 判 412（实测 262 字节空响应），
-            # 这也是之前「Gopeed status=error 无详情」的真正原因。
             download_headers = {
-                "user-agent": DESKTOP_UA,
+                "user-agent": ua,
                 "cookie": cookie,
                 "referer": "https://pan.quark.cn/",
             }
             return url, download_headers
         last_message = (
-            str(payload.get("message") or payload.get("msg") or "")
-            or f"code={payload.get('code')}"
-        )
+            f"{channel} code={payload.get('code')} "
+            f"{payload.get('message') or payload.get('msg') or ''}"
+        ).strip()
     raise QuarkError(f"夸克未返回下载地址：{last_message or '未知原因'}")
