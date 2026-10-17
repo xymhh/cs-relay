@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.pyc
+.env
+
+# 会话级便签
+/*_TODO.md
