@@ -1,7 +1,7 @@
 services:
   relay:
     build: .
-    image: cs-relay:0.4.8
+    image: cs-relay:0.4.9
     container_name: cs-relay
     restart: unless-stopped
     env_file:

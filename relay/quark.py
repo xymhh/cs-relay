@@ -46,6 +46,44 @@ def _data(payload: Any) -> Any:
     return payload.get("data") or {}
 
 
+def refresh_cookie(cookie: str, timeout: int = 15) -> str:
+    """用一次轻量 API 请求刷新 __puus。
+
+    夸克把会话令牌放在 Set-Cookie 的 __puus 里滚动下发；.env/扩展设置里的那份
+    很快过期，过期后 /file/download 仍返回直链，但 CDN 一律 412（262 字节）。
+    只要把响应里的新 __puus 覆盖回 cookie 就能继续用。
+    """
+    if not cookie:
+        return cookie
+    cookie = refresh_cookie(cookie)
+    headers = dict(DEFAULT_HEADERS)
+    headers["cookie"] = cookie
+    try:
+        response = requests.get(
+            f"{BASE_URL}/member",
+            params={"pr": "ucpro", "fr": "pc"},
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.RequestException:
+        return cookie
+    raw = response.headers.get("set-cookie") or ""
+    parts = [p.strip() for p in raw.split(",") if "__puus=" in p]
+    if not parts:
+        return cookie
+    new_puus = parts[-1].split(";")[0].strip()
+    if not new_puus.startswith("__puus="):
+        return cookie
+    cookie_parts = [p.strip() for p in cookie.split(";") if p.strip()]
+    for index, part in enumerate(cookie_parts):
+        if part.startswith("__puus="):
+            cookie_parts[index] = new_puus
+            break
+    else:
+        cookie_parts.append(new_puus)
+    return "; ".join(cookie_parts)
+
+
 def resolve_download_link(
         cookie: str, file_id: str, timeout: int = 30,
 ) -> tuple[str, dict[str, str]]:
