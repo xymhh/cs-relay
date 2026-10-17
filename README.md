@@ -13,6 +13,20 @@
 | `cs-relay` | 任务队列 + 夸克取链 + 115 上传 | `8787`（需鉴权） |
 | `cs-gopeed` | 夸克多连接下载（仅内网可达） | 不映射到宿主机 |
 
+
+### 下载腿：内置引擎（默认）与 Gopeed
+
+`RELAY_DOWNLOAD_ENGINE=builtin`（默认）走 `relay/downloader.py`：单进程线程池 +
+Range 分片（8–16 并发），请求头（cookie/UA/Referer）完全由中继自己带，
+**不依赖 Gopeed 及其扩展**。Gopeed 的夸克直链下载常常因为缺扩展/丢请求头直接
+`status=error`，而失败原因又不透明。
+
+`RELAY_DOWNLOAD_ENGINE=gopeed` 保留原实现（Gopeed 多连接），仅作对照 / 回退。
+
+内置引擎行为：先 `Range: bytes=0-0` 探总大小与分段能力 → 按 8 MB 分片并发拉取 →
+`os.pwrite` 按偏移写入 → 校验总大小与 SHA1；403/404 会直接抛成「直链返回 403（cookie 失效或请求头不够）」
+这类可读错误，而不是一句 `status=error`。
+
 ## 部署（深圳 ECS）
 
 ```bash

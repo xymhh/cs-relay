@@ -28,6 +28,7 @@ def make_config(tmp: Path) -> Config:
         max_file_bytes=25 * 1024 ** 3,
         internal_endpoint="oss-cn-shenzhen-internal.aliyuncs.com",
         job_timeout=60,
+        download_engine="gopeed",
     )
 
 

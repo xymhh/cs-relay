@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import logbuf
+from . import downloader, logbuf
 from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .p115 import P115Error, Uploader
@@ -216,11 +216,13 @@ class JobManager:
             )
             if self._is_cancelled(job_id):
                 raise GopeedError("任务已取消")
+            engine = str(getattr(self.config, "download_engine", "builtin") or "builtin").lower()
             self._update(
                 job_id, phase="download", progress=5,
-                message="正在下载源文件（Gopeed 多连接）",
+                message=("正在下载源文件（内置多连接）" if engine == "builtin"
+                         else "正在下载源文件（Gopeed 多连接）"),
             )
-            gopeed = self._gopeed_factory()
+            local_path = job_dir / name
             last = {"bytes": 0, "at": time.monotonic()}
 
             def on_download(done: int, total: int) -> None:
@@ -234,17 +236,27 @@ class JobManager:
                     speed=speed,
                 )
 
-            gopeed_task = gopeed.create_task(
-                url, headers, str(job_dir), name, connections=self.config.gopeed_connections,
-            )
-            gopeed.wait(
-                gopeed_task, timeout=self.config.job_timeout,
-                on_progress=on_download,
-                cancelled=lambda: self._is_cancelled(job_id),
-            )
-            local_path = job_dir / name
+            if engine == "gopeed":
+                gopeed = self._gopeed_factory()
+                gopeed_task = gopeed.create_task(
+                    url, headers, str(job_dir), name, connections=self.config.gopeed_connections,
+                )
+                gopeed.wait(
+                    gopeed_task, timeout=self.config.job_timeout,
+                    on_progress=on_download,
+                    cancelled=lambda: self._is_cancelled(job_id),
+                )
+            else:
+                # 内置下载腿：自己带 cookie/UA/Referer，不依赖 Gopeed 扩展
+                downloader.download(
+                    url, headers, local_path, size,
+                    progress=on_download,
+                    cancelled=lambda: self._is_cancelled(job_id),
+                    connections=min(int(self.config.gopeed_connections or 8), 16),
+                    timeout=120.0,
+                )
             if not local_path.is_file():
-                raise GopeedError(f"下载完成但文件不存在：{local_path}")
+                raise downloader.DownloadError(f"下载完成但文件不存在：{local_path}")
             actual_size = local_path.stat().st_size
             if size and actual_size != size:
                 raise GopeedError(f"下载大小不符：{actual_size}/{size}")
@@ -280,7 +292,7 @@ class JobManager:
                 },
                 finished_at=_now(),
             )
-        except (QuarkError, GopeedError, P115Error, ValueError, OSError) as error:
+        except (QuarkError, GopeedError, downloader.DownloadError, P115Error, ValueError, OSError) as error:
             logbuf.log(f"[job] {job_id} 失败：{str(error)[:300]}")
             cancelled = self._is_cancelled(job_id)
             self._update(

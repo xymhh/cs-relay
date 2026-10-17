@@ -24,7 +24,7 @@ from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -56,6 +56,7 @@ def _debug_status(config: Config, manager: JobManager) -> dict:
             "gopeed_url": config.gopeed_url,
             "gopeed_token_configured": bool(config.gopeed_token),
             "gopeed_connections": config.gopeed_connections,
+            "download_engine": config.download_engine,
             "quark_cookie_configured": bool(config.quark_cookie),
             "p115_cookie_configured": bool(config.p115_cookie),
             "max_file_bytes": config.max_file_bytes,
@@ -105,6 +106,9 @@ def _debug_selfcheck(config: Config) -> dict:
         checks["gopeed"] = {"ok": False, "error": str(error)[:300]}
 
     # 3) 凭证是否配置（只报有无，不回报内容）
+    # 4) 当前下载腿引擎（builtin 不需要 Gopeed）
+    checks["download_engine"] = {"ok": True, "engine": config.download_engine}
+
     checks["credentials"] = {
         "quark_cookie": bool(config.quark_cookie),
         "p115_cookie": bool(config.p115_cookie),

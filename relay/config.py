@@ -28,6 +28,12 @@ def _read_secret(env: dict, direct_key: str, file_key: str) -> str:
     return ""
 
 
+def _engine(value: object) -> str:
+    """下载腿引擎：builtin（默认，自带 cookie/UA/Referer，不依赖 Gopeed 扩展）或 gopeed。"""
+    text = str(value or "builtin").strip().lower()
+    return text if text in {"builtin", "gopeed"} else "builtin"
+
+
 @dataclass(frozen=True)
 class Config:
     token: str
@@ -43,6 +49,7 @@ class Config:
     max_file_bytes: int
     internal_endpoint: str
     job_timeout: int
+    download_engine: str = "builtin"
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Config":
@@ -66,6 +73,7 @@ class Config:
                 or "oss-cn-shenzhen-internal.aliyuncs.com"
             ).strip(),
             job_timeout=_int(env.get("RELAY_JOB_TIMEOUT_SECONDS", "10800"), 10800, 60, 86400),
+            download_engine=_engine(env.get("RELAY_DOWNLOAD_ENGINE")),
         )
 
     def validate(self) -> list[str]:
