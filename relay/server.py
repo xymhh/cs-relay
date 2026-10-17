@@ -26,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -366,7 +366,16 @@ def make_handler(config: Config, manager: JobManager):
                         resp.close()
                     except requests.RequestException as error:
                         results[label] = {"error": type(error).__name__}
-                return _json(self, 200, {"url_length": len(url), "results": results})
+                from urllib.parse import parse_qs, urlparse
+                query = parse_qs(urlparse(url).query)
+                return _json(self, 200, {
+                    "url_length": len(url),
+                    "param_keys": sorted(query.keys()),
+                    "ud": (query.get("ud") or [""])[0],
+                    "cookie_sha8": __import__("hashlib").sha256(
+                        cookie.encode()).hexdigest()[:8],
+                    "results": results,
+                })
             if path == "/debug/resolve":
                 try:
                     return _json(self, 200, _debug_resolve(config, self._body()))
