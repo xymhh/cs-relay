@@ -141,26 +141,12 @@ class JobManager:
             return job_id in self._cancelled
 
     def _quark_cookie(self) -> str:
-        """优先用夸克扩展里保存的 cookie。
+        """用 .env 里的 cookie，并在取链时刷新 __puus。
 
-        扩展会自己续期 __puus，而 .env 里那份很快过期；过期后取到的直链会被
-        CDN 判 412。拿不到就退回 .env。
+        Gopeed 夸克扩展里那份 cookie 只有扩展自己跑任务时才会续期，中继拿它
+        取链会拿到签名过期、CDN 一律 412 的直链；.env 那份配合 member 请求
+        滚动刷新 __puus 才是可控的。
         """
-        try:
-            client = self._gopeed_factory()
-            listing = client.request("GET", "/api/v1/extensions")
-            for ext in listing.get("data") or []:
-                if "quark" not in str(ext.get("name") or "").lower():
-                    continue
-                identity = str(ext.get("identity") or "")
-                if not identity:
-                    continue
-                detail = client.request("GET", f"/api/v1/extensions/{identity}")
-                for item in (detail.get("data") or {}).get("settings") or []:
-                    if item.get("name") == "cookie" and item.get("value"):
-                        return str(item["value"])
-        except Exception:  # noqa: BLE001 - 拿不到就退回配置
-            pass
         return self.config.quark_cookie
 
     def _update(self, job_id: str, **fields: Any) -> None:

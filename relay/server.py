@@ -26,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -336,18 +336,9 @@ def make_handler(config: Config, manager: JobManager):
                 file_id = str(payload.get("file_id") or "").strip()
                 if not file_id:
                     return _json(self, 400, {"error": "file_id 不能为空"})
-                gopeed = GopeedClient(config.gopeed_url, config.gopeed_token)
+                # 只测任务实际会用的那份 cookie（.env），不再读扩展设置：
+                # 扩展里那份只有扩展自己跑任务时才续期，取链会 412。
                 cookie = config.quark_cookie
-                try:
-                    ext = gopeed.request(
-                        "GET", "/api/v1/extensions/Gwkang@gopeed-extension-quark"
-                    )
-                    for item in (ext.get("data") or {}).get("settings") or []:
-                        if item.get("name") == "cookie" and item.get("value"):
-                            cookie = str(item["value"])
-                            break
-                except GopeedError:
-                    pass
                 try:
                     url, _ = resolve_download_link(cookie, file_id)
                 except QuarkError as error:
