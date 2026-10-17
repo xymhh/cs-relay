@@ -10,6 +10,8 @@ jobs:
   export:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Pull and save
         run: |
           set -euo pipefail
