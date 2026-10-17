@@ -22,6 +22,10 @@ services:
     image: liwei2633/gopeed:latest
     container_name: cs-gopeed
     restart: unless-stopped
+    environment:
+      - PUID=0
+      - PGID=0
+      - UMASK=022
     volumes:
       - ./data:/data
     # 只在内网可达；不映射到宿主机，避免暴露下载器 UI
