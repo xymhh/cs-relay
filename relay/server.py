@@ -26,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -320,6 +320,53 @@ def make_handler(config: Config, manager: JobManager):
                     return _json(self, 502, {"error": str(error)[:400]})
                 logbuf.log(f"[debug] gopeed {method} {target} -> ok")
                 return _json(self, 200, result)
+            if path == "/debug/quark/probe":
+                # 逐个 header 组合试探直链，定位 412 到底卡在哪一项
+                try:
+                    payload = self._body()
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)})
+                file_id = str(payload.get("file_id") or "").strip()
+                if not file_id:
+                    return _json(self, 400, {"error": "file_id 不能为空"})
+                gopeed = GopeedClient(config.gopeed_url, config.gopeed_token)
+                cookie = config.quark_cookie
+                try:
+                    ext = gopeed.request(
+                        "GET", "/api/v1/extensions/Gwkang@gopeed-extension-quark"
+                    )
+                    for item in (ext.get("data") or {}).get("settings") or []:
+                        if item.get("name") == "cookie" and item.get("value"):
+                            cookie = str(item["value"])
+                            break
+                except GopeedError:
+                    pass
+                try:
+                    url, _ = resolve_download_link(cookie, file_id)
+                except QuarkError as error:
+                    return _json(self, 502, {"error": str(error)[:300]})
+                ua = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
+                    "Safari/537.36"
+                )
+                variants = {
+                    "min": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/"},
+                    "range": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/", "range": "bytes=0-1023"},
+                    "accept_all": {"user-agent": ua, "cookie": cookie, "referer": "https://pan.quark.cn/", "accept": "*/*"},
+                    "ua_only": {"user-agent": ua, "referer": "https://pan.quark.cn/"},
+                    "cookie_only": {"cookie": cookie, "referer": "https://pan.quark.cn/"},
+                }
+                results = {}
+                for label, headers in variants.items():
+                    try:
+                        resp = requests.get(url, headers=headers, stream=True, timeout=20)
+                        chunk = next(resp.iter_content(1024), b"")
+                        results[label] = {"status": resp.status_code, "bytes": len(chunk)}
+                        resp.close()
+                    except requests.RequestException as error:
+                        results[label] = {"error": type(error).__name__}
+                return _json(self, 200, {"url_length": len(url), "results": results})
             if path == "/debug/resolve":
                 try:
                     return _json(self, 200, _debug_resolve(config, self._body()))
