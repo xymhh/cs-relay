@@ -66,6 +66,7 @@ class JobManager:
             raise ValueError("target 必须是对象")
         size = int(payload.get("size") or 0)
         if size <= 0:
+            logbuf.log(f"[jobs] 提交被拒：size={size} payload_keys={sorted(payload)}")
             raise ValueError("size 必须大于 0")
         if self.config.max_file_bytes and size > self.config.max_file_bytes:
             raise ValueError(
@@ -75,6 +76,9 @@ class JobManager:
         if not name:
             raise ValueError("file_name 不能为空")
         if not str(payload.get("file_id") or "").strip():
+            logbuf.log(
+                f"[jobs] 提交被拒：file_id 为空（file_name={name} size={size}）"
+            )
             raise ValueError("file_id 不能为空")
         job = {
             "id": uuid.uuid4().hex[:12],

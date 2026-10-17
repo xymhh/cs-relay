@@ -223,6 +223,7 @@ def make_handler(config: Config, manager: JobManager):
                     payload = self._body()
                     job = manager.submit(payload)
                 except ValueError as error:
+                    logbuf.log(f"[jobs] 400：{error}")
                     return _json(self, 400, {"error": str(error)})
                 except Exception as error:  # noqa: BLE001
                     return _json(self, 500, {"error": str(error)[:300]})
