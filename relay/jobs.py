@@ -147,12 +147,18 @@ class JobManager:
         CDN 判 412。拿不到就退回 .env。
         """
         try:
-            ext = self._gopeed_factory().request(
-                "GET", "/api/v1/extensions/Gwkang@gopeed-extension-quark"
-            )
-            for item in (ext.get("data") or {}).get("settings") or []:
-                if item.get("name") == "cookie" and item.get("value"):
-                    return str(item["value"])
+            client = self._gopeed_factory()
+            listing = client.request("GET", "/api/v1/extensions")
+            for ext in listing.get("data") or []:
+                if "quark" not in str(ext.get("name") or "").lower():
+                    continue
+                identity = str(ext.get("identity") or "")
+                if not identity:
+                    continue
+                detail = client.request("GET", f"/api/v1/extensions/{identity}")
+                for item in (detail.get("data") or {}).get("settings") or []:
+                    if item.get("name") == "cookie" and item.get("value"):
+                        return str(item["value"])
         except Exception:  # noqa: BLE001 - 拿不到就退回配置
             pass
         return self.config.quark_cookie

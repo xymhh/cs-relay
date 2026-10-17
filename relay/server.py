@@ -26,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -228,13 +228,20 @@ def make_handler(config: Config, manager: JobManager):
                     gopeed = GopeedClient(config.gopeed_url, config.gopeed_token)
                     cookie = config.quark_cookie
                     try:
-                        ext = gopeed.request(
-                            "GET", "/api/v1/extensions/Gwkang@gopeed-extension-quark"
-                        )
-                        for item in (ext.get("data") or {}).get("settings") or []:
-                            if item.get("name") == "cookie" and item.get("value"):
-                                cookie = str(item["value"])
-                                break
+                        listing = gopeed.request("GET", "/api/v1/extensions")
+                        for ext in listing.get("data") or []:
+                            if "quark" not in str(ext.get("name") or "").lower():
+                                continue
+                            identity = str(ext.get("identity") or "")
+                            if not identity:
+                                continue
+                            detail = gopeed.request(
+                                "GET", f"/api/v1/extensions/{identity}"
+                            )
+                            for item in (detail.get("data") or {}).get("settings") or []:
+                                if item.get("name") == "cookie" and item.get("value"):
+                                    cookie = str(item["value"])
+                                    break
                     except GopeedError:
                         pass
                     url, headers = resolve_download_link(cookie, file_id)
