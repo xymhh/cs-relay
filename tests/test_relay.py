@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from relay.config import Config
-from relay.downloader import DownloadError
+from relay.gopeed import GopeedError
 from relay.jobs import JobManager
 from relay.p115 import internalize
 
@@ -18,7 +18,9 @@ def make_config(tmp: Path) -> Config:
         token="t0ken",
         quark_cookie="quark=1",
         p115_cookie="uid=1",
-        download_connections=4,
+        gopeed_url="http://gopeed:9999",
+        gopeed_token="",
+        gopeed_connections=64,
         data_dir=tmp,
         spend_dir=tmp / "downloads",
         upload_concurrency=2,
@@ -29,19 +31,26 @@ def make_config(tmp: Path) -> Config:
     )
 
 
-class FakeDownload:
+class FakeGopeed:
     def __init__(self, payload: bytes, fail: bool = False):
         self.payload = payload
         self.fail = fail
+        self.deleted = []
 
-    def __call__(self, url, headers, dest, size, connections=4,
-                 progress=None, cancelled=None):
+    def create_task(self, url, headers, path, name, connections=0):
         if self.fail:
-            raise DownloadError("boom")
-        Path(dest).write_bytes(self.payload)
-        if progress:
-            progress(len(self.payload), len(self.payload))
-        return len(self.payload)
+            raise GopeedError("boom")
+        Path(path).mkdir(parents=True, exist_ok=True)
+        (Path(path) / name).write_bytes(self.payload)
+        return "task-1"
+
+    def wait(self, task_id, timeout, on_progress=None, cancelled=None):
+        if on_progress:
+            on_progress(len(self.payload), len(self.payload))
+        return {"status": "done"}
+
+    def delete_task(self, task_id, force=True):
+        self.deleted.append(task_id)
 
 
 class FakeUploader:
@@ -107,11 +116,11 @@ class JobManagerTest(unittest.TestCase):
         self.fail("job did not finish")
 
     def test_success_flow(self):
-        downloader = FakeDownload(self.payload)
+        gopeed = FakeGopeed(self.payload)
         uploader = FakeUploader()
         manager = JobManager(
             self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {"ua": "q"}),
-            download_func=downloader, uploader_factory=lambda: uploader,
+            gopeed_factory=lambda: gopeed, uploader_factory=lambda: uploader,
         )
         job = manager.submit({
             "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
@@ -123,13 +132,14 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(done["result"]["sha1"], self.sha1)
         self.assertEqual(done["result"]["pickcode"], "pc123")
         self.assertEqual(uploader.calls[0]["remote"], "/整理/待整理")
+        self.assertEqual(gopeed.deleted, ["task-1"])
         self.assertFalse((self.cfg.spend_dir / job["id"]).exists())
 
     def test_sha1_mismatch_fails_and_cleans(self):
-        downloader = FakeDownload(self.payload[:-1])
+        gopeed = FakeGopeed(self.payload[:-1])
         manager = JobManager(
             self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {}),
-            download_func=downloader, uploader_factory=FakeUploader,
+            gopeed_factory=lambda: gopeed, uploader_factory=FakeUploader,
         )
         job = manager.submit({
             "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
@@ -143,7 +153,7 @@ class JobManagerTest(unittest.TestCase):
     def test_rejects_oversize_and_missing_fields(self):
         manager = JobManager(
             self.cfg, resolver=lambda *a: ("", {}),
-            download_func=FakeDownload(b""), uploader_factory=FakeUploader,
+            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
         )
         with self.assertRaises(ValueError):
             manager.submit({"file_name": "a", "size": 1, "target": {}})
@@ -163,7 +173,7 @@ class ServerTest(unittest.TestCase):
         cfg = make_config(tmp)
         manager = JobManager(
             cfg, resolver=lambda *a: ("", {}),
-            download_func=FakeDownload(b""), uploader_factory=FakeUploader,
+            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
         )
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cfg, manager))
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)

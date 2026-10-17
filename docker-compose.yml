@@ -1,7 +1,7 @@
 services:
   relay:
     build: .
-    image: cs-relay:0.1.1
+    image: cs-relay:0.1.0
     container_name: cs-relay
     restart: unless-stopped
     env_file:
@@ -10,6 +10,23 @@ services:
       - "8787:8787"
     volumes:
       - ./data:/data
+    depends_on:
+      - gopeed
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gopeed:
+    image: gopeedlab/gopeed:latest
+    container_name: cs-gopeed
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    # 只在内网可达；不映射到宿主机，避免暴露下载器 UI
+    expose:
+      - "9999"
     logging:
       driver: json-file
       options:

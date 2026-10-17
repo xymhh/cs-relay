@@ -33,7 +33,9 @@ class Config:
     token: str
     quark_cookie: str
     p115_cookie: str
-    download_connections: int
+    gopeed_url: str
+    gopeed_token: str
+    gopeed_connections: int
     data_dir: Path
     spend_dir: Path
     upload_concurrency: int
@@ -51,7 +53,9 @@ class Config:
             token=str(env.get("RELAY_TOKEN") or "").strip(),
             quark_cookie=_read_secret(env, "QUARK_COOKIE", "QUARK_COOKIE_FILE"),
             p115_cookie=_read_secret(env, "P115_COOKIE", "P115_COOKIE_FILE"),
-            download_connections=_int(env.get("DOWNLOAD_CONNECTIONS", "8"), 8, 1, 16),
+            gopeed_url=str(env.get("GOPEED_URL") or "http://gopeed:9999").strip().rstrip("/"),
+            gopeed_token=str(env.get("GOPEED_TOKEN") or "").strip(),
+            gopeed_connections=_int(env.get("GOPEED_CONNECTIONS", "64"), 64, 0, 512),
             data_dir=data_dir,
             spend_dir=data_dir / "downloads",
             upload_concurrency=_int(env.get("P115_UPLOAD_CONCURRENCY", "4"), 4, 1, 16),

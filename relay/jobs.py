@@ -1,4 +1,4 @@
-"""任务队列：解析直链 -> 多连接分段下载 -> 115 内网上传 -> 校验 -> 清理。
+"""任务队列：解析直链 -> Gopeed 下载 -> 115 内网上传 -> 校验 -> 清理。
 
 串行执行（35 GB 盘，同时只处理一个文件）。任务状态挂在内存里，并周期性
 落盘到 jobs.json，relay 重启后仍能查到最近结果。
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .downloader import DownloadError, download
+from .gopeed import GopeedClient, GopeedError
 from .p115 import P115Error, Uploader
 from .quark import QuarkError, resolve_download_link
 
@@ -32,12 +32,14 @@ class JobManager:
             self,
             config: Config,
             resolver: Callable[[str, str], tuple[str, dict]] = resolve_download_link,
-            download_func: Callable[..., int] = download,
+            gopeed_factory: Callable[[], GopeedClient] | None = None,
             uploader_factory: Callable[[], Uploader] | None = None,
     ):
         self.config = config
         self._resolver = resolver
-        self._download = download_func
+        self._gopeed_factory = gopeed_factory or (
+            lambda: GopeedClient(config.gopeed_url, config.gopeed_token)
+        )
         self._uploader_factory = uploader_factory or (
             lambda: Uploader(
                 config.p115_cookie,
@@ -188,6 +190,7 @@ class JobManager:
         sha1 = payload["sha1"]
         job_dir = Path(self.config.spend_dir) / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
+        gopeed_task = ""
         started = _now()
         self._update(
             job_id, status="running", phase="resolve", progress=2,
@@ -198,11 +201,12 @@ class JobManager:
                 raise ValueError(f"暂不支持源网盘：{payload['provider']}")
             url, headers = self._resolver(self.config.quark_cookie, payload["file_id"])
             if self._is_cancelled(job_id):
-                raise DownloadError("任务已取消")
+                raise GopeedError("任务已取消")
             self._update(
                 job_id, phase="download", progress=5,
-                message="正在下载源文件（多连接分段）",
+                message="正在下载源文件（Gopeed 多连接）",
             )
+            gopeed = self._gopeed_factory()
             last = {"bytes": 0, "at": time.monotonic()}
 
             def on_download(done: int, total: int) -> None:
@@ -216,22 +220,24 @@ class JobManager:
                     speed=speed,
                 )
 
-            local_path = job_dir / name
-            self._download(
-                url, headers, local_path, size,
-                connections=self.config.download_connections,
-                progress=on_download,
+            gopeed_task = gopeed.create_task(
+                url, headers, str(job_dir), name, connections=self.config.gopeed_connections,
+            )
+            gopeed.wait(
+                gopeed_task, timeout=self.config.job_timeout,
+                on_progress=on_download,
                 cancelled=lambda: self._is_cancelled(job_id),
             )
+            local_path = job_dir / name
             if not local_path.is_file():
-                raise DownloadError(f"下载完成但文件不存在：{local_path}")
+                raise GopeedError(f"下载完成但文件不存在：{local_path}")
             actual_size = local_path.stat().st_size
             if size and actual_size != size:
-                raise DownloadError(f"下载大小不符：{actual_size}/{size}")
+                raise GopeedError(f"下载大小不符：{actual_size}/{size}")
             if not sha1:
                 sha1 = self._sha1(local_path)
             elif self._sha1(local_path) != sha1:
-                raise DownloadError("下载后 SHA1 校验失败")
+                raise GopeedError("下载后 SHA1 校验失败")
             self._update(
                 job_id, phase="upload", progress=95,
                 message="正在上传到 115（内网端点）",
@@ -260,7 +266,7 @@ class JobManager:
                 },
                 finished_at=_now(),
             )
-        except (QuarkError, DownloadError, P115Error, ValueError, OSError) as error:
+        except (QuarkError, GopeedError, P115Error, ValueError, OSError) as error:
             cancelled = self._is_cancelled(job_id)
             self._update(
                 job_id,
@@ -271,6 +277,11 @@ class JobManager:
                 finished_at=_now(),
             )
         finally:
+            if gopeed_task:
+                try:
+                    self._gopeed_factory().delete_task(gopeed_task, force=True)
+                except Exception:  # noqa: BLE001 - 清理失败不影响任务结论
+                    pass
             shutil.rmtree(job_dir, ignore_errors=True)
 
     @staticmethod

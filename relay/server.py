@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .config import Config
 from .jobs import JobManager
 
-VERSION = "0.1.1"
+VERSION = "0.1.0"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
