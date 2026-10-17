@@ -17,16 +17,17 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import hashlib
 import requests
 
 from . import logbuf
 from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
-from .quark import QuarkError, resolve_download_link
+from .quark import QuarkError, load_cookie, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -338,9 +339,11 @@ def make_handler(config: Config, manager: JobManager):
                     return _json(self, 400, {"error": "file_id 不能为空"})
                 # 只测任务实际会用的那份 cookie（.env），不再读扩展设置：
                 # 扩展里那份只有扩展自己跑任务时才续期，取链会 412。
-                cookie = config.quark_cookie
+                cookie = load_cookie(
+                    config.data_dir / "quark_cookie.txt", config.quark_cookie)
+                before = hashlib.sha256(cookie.encode()).hexdigest()[:8]
                 try:
-                    url, _ = resolve_download_link(cookie, file_id)
+                    url, resolved_headers = resolve_download_link(cookie, file_id)
                 except QuarkError as error:
                     return _json(self, 502, {"error": str(error)[:300]})
                 ua = (
@@ -366,12 +369,19 @@ def make_handler(config: Config, manager: JobManager):
                         results[label] = {"error": type(error).__name__}
                 from urllib.parse import parse_qs, urlparse
                 query = parse_qs(urlparse(url).query)
+                used = str(resolved_headers.get("cookie") or cookie)
                 return _json(self, 200, {
                     "url_length": len(url),
                     "param_keys": sorted(query.keys()),
                     "ud": (query.get("ud") or [""])[0],
-                    "cookie_sha8": __import__("hashlib").sha256(
-                        cookie.encode()).hexdigest()[:8],
+                    "cookie_sha8": before,
+                    "cookie_sha8_used": __import__("hashlib").sha256(
+                        used.encode()).hexdigest()[:8],
+                    "cookie_len": len(used),
+                    "cookie_keys": [
+                        part.split("=", 1)[0].strip()
+                        for part in used.split(";") if "=" in part
+                    ],
                     "results": results,
                 })
             if path == "/debug/resolve":
