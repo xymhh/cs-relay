@@ -81,7 +81,15 @@ def resolve_download_link(
         entry = items[0] if isinstance(items, list) and items else {}
         url = str((entry or {}).get("download_url") or "")
         if url:
-            return url, dict(headers)
+            # 直链只认最小请求头：UA + Cookie + Referer。
+            # 带上 accept/origin/accept-language 会被夸克 CDN 判 412（实测 262 字节空响应），
+            # 这也是之前「Gopeed status=error 无详情」的真正原因。
+            download_headers = {
+                "user-agent": DESKTOP_UA,
+                "cookie": cookie,
+                "referer": "https://pan.quark.cn/",
+            }
+            return url, download_headers
         last_message = (
             str(payload.get("message") or payload.get("msg") or "")
             or f"code={payload.get('code')}"

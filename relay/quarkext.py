@@ -105,6 +105,14 @@ def ensure_quark_extension(
         status["identity"] = identity
         if not identity:
             raise RuntimeError("扩展缺少 identity，无法写设置")
+        # 装完必须显式启用，否则 Gopeed 不加载 onResolve（会当普通网页下载）
+        try:
+            gopeed.request(
+                "PUT", f"/api/v1/extensions/{identity}/switch", {"status": True},
+            )
+            _log(logger, "扩展已启用")
+        except Exception as error:  # noqa: BLE001 - 启用失败不阻断安装结果
+            _log(logger, f"启用扩展失败：{type(error).__name__}: {error}")
         if cookie:
             gopeed.request(
                 "PUT", f"/api/v1/extensions/{identity}/settings",
