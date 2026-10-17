@@ -140,6 +140,23 @@ class JobManager:
         with self._lock:
             return job_id in self._cancelled
 
+    def _quark_cookie(self) -> str:
+        """优先用夸克扩展里保存的 cookie。
+
+        扩展会自己续期 __puus，而 .env 里那份很快过期；过期后取到的直链会被
+        CDN 判 412。拿不到就退回 .env。
+        """
+        try:
+            ext = self._gopeed_factory().request(
+                "GET", "/api/v1/extensions/Gwkang@gopeed-extension-quark"
+            )
+            for item in (ext.get("data") or {}).get("settings") or []:
+                if item.get("name") == "cookie" and item.get("value"):
+                    return str(item["value"])
+        except Exception:  # noqa: BLE001 - 拿不到就退回配置
+            pass
+        return self.config.quark_cookie
+
     def _update(self, job_id: str, **fields: Any) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -220,7 +237,7 @@ class JobManager:
                 url, headers = source_url, {}
                 logbuf.log(f"[job] {job_id} 交给扩展解析：{source_url.split('?')[0][:120]}")
             else:
-                url, headers = self._resolver(self.config.quark_cookie, payload["file_id"])
+                url, headers = self._resolver(self._quark_cookie(), payload["file_id"])
             # 只打域名和请求头键名（绝不打 cookie/直链令牌），用于判断
             # Gopeed 拿到的到底是什么；403 时靠这一行区分「没带 cookie」还是「链接失效」
             host = ""
