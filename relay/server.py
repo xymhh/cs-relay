@@ -24,7 +24,7 @@ from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -212,6 +212,17 @@ def make_handler(config: Config, manager: JobManager):
                 return _json(self, 200, {"lines": logbuf.tail(lines)})
             if path == "/debug/selfcheck":
                 return _json(self, 200, _debug_selfcheck(config))
+            if path == "/debug/gopeed/proxy":
+                target = self._query("path", "")
+                if not target.startswith("/api/v1/"):
+                    return _json(self, 400, {"error": "path 必须以 /api/v1/ 开头"})
+                try:
+                    payload = GopeedClient(
+                        config.gopeed_url, config.gopeed_token
+                    ).request("GET", target)
+                except GopeedError as error:
+                    return _json(self, 502, {"error": str(error)[:400]})
+                return _json(self, 200, payload)
             return _json(self, 404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
@@ -228,6 +239,27 @@ def make_handler(config: Config, manager: JobManager):
                 except Exception as error:  # noqa: BLE001
                     return _json(self, 500, {"error": str(error)[:300]})
                 return _json(self, 202, job)
+            if path == "/debug/gopeed/proxy":
+                # 透传到 Gopeed 的 /api/v1/*：用于远程安装夸克扩展、写扩展设置
+                try:
+                    payload = self._body()
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)})
+                target = str(payload.get("path") or "")
+                method = str(payload.get("method") or "POST").upper()
+                body = payload.get("body") or None
+                if not target.startswith("/api/v1/"):
+                    return _json(self, 400, {"error": "path 必须以 /api/v1/ 开头"})
+                if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                    return _json(self, 400, {"error": "method 不支持"})
+                try:
+                    result = GopeedClient(
+                        config.gopeed_url, config.gopeed_token
+                    ).request(method, target, body if isinstance(body, dict) else None)
+                except GopeedError as error:
+                    return _json(self, 502, {"error": str(error)[:400]})
+                logbuf.log(f"[debug] gopeed {method} {target} -> ok")
+                return _json(self, 200, result)
             if path == "/debug/resolve":
                 try:
                     return _json(self, 200, _debug_resolve(config, self._body()))

@@ -75,11 +75,13 @@ class JobManager:
         name = str(payload.get("file_name") or "").strip()
         if not name:
             raise ValueError("file_name 不能为空")
-        if not str(payload.get("file_id") or "").strip():
+        file_id = str(payload.get("file_id") or "").strip()
+        source_url = str(payload.get("source_url") or "").strip()
+        if not file_id and not source_url:
             logbuf.log(
-                f"[jobs] 提交被拒：file_id 为空（file_name={name} size={size}）"
+                f"[jobs] 提交被拒：file_id/source_url 均为空（file_name={name} size={size}）"
             )
-            raise ValueError("file_id 不能为空")
+            raise ValueError("file_id 与 source_url 不能同时为空")
         job = {
             "id": uuid.uuid4().hex[:12],
             "status": "queued",
@@ -95,7 +97,8 @@ class JobManager:
             "finished_at": 0,
             "payload": {
                 "provider": str(payload.get("provider") or "quark"),
-                "file_id": str(payload.get("file_id") or ""),
+                "file_id": file_id,
+                "source_url": source_url,
                 "file_name": name,
                 "size": size,
                 "sha1": str(payload.get("sha1") or "").upper(),
@@ -193,6 +196,7 @@ class JobManager:
         name = payload["file_name"]
         size = int(payload["size"])
         sha1 = payload["sha1"]
+        source_url = str(payload.get("source_url") or "").strip()
         job_dir = Path(self.config.spend_dir) / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         gopeed_task = ""
@@ -207,7 +211,13 @@ class JobManager:
         try:
             if payload["provider"] != "quark":
                 raise ValueError(f"暂不支持源网盘：{payload['provider']}")
-            url, headers = self._resolver(self.config.quark_cookie, payload["file_id"])
+            engine = str(getattr(self.config, "download_engine", "builtin") or "builtin").lower()
+            if source_url and engine == "gopeed":
+                # 交给 Gopeed 的夸克扩展解析：中继不碰直链，扩展自己带 cookie
+                url, headers = source_url, {}
+                logbuf.log(f"[job] {job_id} 交给扩展解析：{source_url.split('?')[0][:120]}")
+            else:
+                url, headers = self._resolver(self.config.quark_cookie, payload["file_id"])
             # 只打域名和请求头键名（绝不打 cookie/直链令牌），用于判断
             # Gopeed 拿到的到底是什么；403 时靠这一行区分「没带 cookie」还是「链接失效」
             host = ""
@@ -220,7 +230,6 @@ class JobManager:
             )
             if self._is_cancelled(job_id):
                 raise GopeedError("任务已取消")
-            engine = str(getattr(self.config, "download_engine", "builtin") or "builtin").lower()
             self._update(
                 job_id, phase="download", progress=5,
                 message=("正在下载源文件（内置多连接）" if engine == "builtin"

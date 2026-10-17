@@ -34,7 +34,10 @@ class GopeedClient:
         if response.status_code == 401:
             raise GopeedError("Gopeed 鉴权失败（HTTP 401），检查 GOPEED_TOKEN")
         if response.status_code >= 400:
-            raise GopeedError(f"Gopeed 接口异常：HTTP {response.status_code}")
+            detail = response.text[:200].replace("\n", " ")
+            raise GopeedError(
+                f"Gopeed 接口异常：HTTP {response.status_code} {detail}"
+            )
         try:
             payload = response.json()
         except ValueError as error:
@@ -58,6 +61,10 @@ class GopeedClient:
         if not task_id:
             raise GopeedError("Gopeed 未返回任务 ID")
         return task_id
+
+    def request(self, method: str, path: str, body: dict | None = None) -> dict:
+        """通用透传（调试用），便于远程安装扩展 / 读扩展设置。"""
+        return self._request(method, path, body)
 
     def info(self) -> dict:
         """读 Gopeed 版本信息（自检用，不创建任务）。"""
