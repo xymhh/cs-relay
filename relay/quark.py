@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -56,6 +57,27 @@ def _data(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return {}
     return payload.get("data") or {}
+
+
+def load_cookie(path: "Path", fallback: str) -> str:
+    """优先用上次刷新后落盘的那份 cookie（__puus 是滚动的）。"""
+    try:
+        stored = path.read_text().strip()
+    except OSError:
+        return fallback
+    return stored or fallback
+
+
+def save_cookie(path: "Path", cookie: str) -> None:
+    if not cookie:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(cookie)
+        tmp.replace(path)
+    except OSError:
+        return
 
 
 def _merge_cookies(cookie: str, session: requests.Session) -> str:

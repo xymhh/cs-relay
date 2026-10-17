@@ -26,7 +26,7 @@ from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:

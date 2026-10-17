@@ -113,7 +113,19 @@ def ensure_quark_extension(
             _log(logger, "扩展已启用")
         except Exception as error:  # noqa: BLE001 - 启用失败不阻断安装结果
             _log(logger, f"启用扩展失败：{type(error).__name__}: {error}")
-        if cookie:
+        # 只在扩展还没配 cookie 时写入：扩展会自己把滚动 __puus 存进 storage，
+        # 每次启动用 .env 里的静态值覆盖它，等于把新鲜令牌换回过期令牌。
+        try:
+            detail = gopeed.request(
+                "GET", f"/api/v1/extensions/{identity}")
+            existing = ""
+            for item in (detail.get("data") or {}).get("settings") or []:
+                if item.get("name") == "cookie":
+                    existing = str(item.get("value") or "")
+                    break
+        except Exception:  # noqa: BLE001 - 读不到就按未配置处理
+            existing = ""
+        if cookie and not existing:
             gopeed.request(
                 "PUT", f"/api/v1/extensions/{identity}/settings",
                 {"settings": {
@@ -123,7 +135,9 @@ def ensure_quark_extension(
                 }},
             )
             _log(logger, "cookie 已写入扩展设置")
-        else:
+        elif existing:
+            _log(logger, "扩展已有 cookie，保留不动")
+        elif not cookie:
             _log(logger, "QUARK_COOKIE 为空，扩展解析会因无 cookie 失败")
         status["ok"] = True
         status["message"] = "ready"

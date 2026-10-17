@@ -21,7 +21,7 @@ from . import downloader, logbuf
 from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .p115 import P115Error, Uploader
-from .quark import QuarkError, resolve_download_link
+from .quark import QuarkError, load_cookie, resolve_download_link, save_cookie
 
 
 def _now() -> float:
@@ -147,7 +147,10 @@ class JobManager:
         取链会拿到签名过期、CDN 一律 412 的直链；.env 那份配合 member 请求
         滚动刷新 __puus 才是可控的。
         """
-        return self.config.quark_cookie
+        return load_cookie(
+            self._state_file.parent / "quark_cookie.txt",
+            self.config.quark_cookie,
+        )
 
     def _update(self, job_id: str, **fields: Any) -> None:
         with self._lock:
@@ -230,6 +233,10 @@ class JobManager:
                 logbuf.log(f"[job] {job_id} 交给扩展解析：{source_url.split('?')[0][:120]}")
             else:
                 url, headers = self._resolver(self._quark_cookie(), payload["file_id"])
+                save_cookie(
+                    self._state_file.parent / "quark_cookie.txt",
+                    str(headers.get("cookie") or ""),
+                )
             # 只打域名和请求头键名（绝不打 cookie/直链令牌），用于判断
             # Gopeed 拿到的到底是什么；403 时靠这一行区分「没带 cookie」还是「链接失效」
             host = ""
