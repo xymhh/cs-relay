@@ -55,6 +55,18 @@ docker compose logs --tail=50 relay
 
 `healthz` 返回 `{"ok": true, ...}` 即可。第一次任务前建议先跑一次 1 GB 级小文件验证 115 上传。
 
+### 升级（部署目录 `/opt/csrelay`，一条命令）
+
+```bash
+cd /opt/csrelay
+curl -fsSL -o /tmp/cs.tar.gz https://ghfast.top/https://github.com/xymhh/cs-relay/archive/refs/heads/main.tar.gz \
+  && tar -xzf /tmp/cs.tar.gz --strip-components=1 \
+  && docker compose up -d --build \
+  && curl -s http://127.0.0.1:8787/debug/status
+```
+
+`.env`、`data/` 不在仓库里，覆盖解压不会动它们。`/debug/status` 里的 `version` 即当前版本。
+
 ## 插件侧配置（MP → 网盘订阅助手 → 设置）
 
 | 配置 | 值 |
