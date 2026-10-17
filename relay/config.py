@@ -28,6 +28,10 @@ def _read_secret(env: dict, direct_key: str, file_key: str) -> str:
     return ""
 
 
+def _bool(value: object) -> bool:
+    return str(value or "").strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _engine(value: object) -> str:
     """下载腿引擎：builtin（默认，自带 cookie/UA/Referer，不依赖 Gopeed 扩展）或 gopeed。"""
     text = str(value or "builtin").strip().lower()
@@ -50,6 +54,7 @@ class Config:
     internal_endpoint: str
     job_timeout: int
     download_engine: str = "builtin"
+    quark_ext_auto: bool = True
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Config":
@@ -74,6 +79,7 @@ class Config:
             ).strip(),
             job_timeout=_int(env.get("RELAY_JOB_TIMEOUT_SECONDS", "10800"), 10800, 60, 86400),
             download_engine=_engine(env.get("RELAY_DOWNLOAD_ENGINE")),
+            quark_ext_auto=_bool(env.get("QUARK_EXT_AUTO", "1")),
         )
 
     def validate(self) -> list[str]:

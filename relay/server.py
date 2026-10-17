@@ -23,6 +23,7 @@ from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
 from .quark import QuarkError, resolve_download_link
+from .quarkext import ensure_quark_extension
 
 VERSION = "0.4.0"
 
@@ -212,6 +213,12 @@ def make_handler(config: Config, manager: JobManager):
                 return _json(self, 200, {"lines": logbuf.tail(lines)})
             if path == "/debug/selfcheck":
                 return _json(self, 200, _debug_selfcheck(config))
+            if path == "/debug/gopeed/install-quark":
+                status = ensure_quark_extension(
+                    GopeedClient(config.gopeed_url, config.gopeed_token),
+                    config.data_dir, config.quark_cookie, logbuf.log,
+                )
+                return _json(self, 200 if status.get("ok") else 502, status)
             if path == "/debug/gopeed/proxy":
                 target = self._query("path", "")
                 if not target.startswith("/api/v1/"):
