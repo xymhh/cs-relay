@@ -1,0 +1,30 @@
+name: Export images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and save
+        run: |
+          set -euo pipefail
+          docker pull gopeedlab/gopeed:latest
+          docker pull python:3.12-slim
+          docker save gopeedlab/gopeed:latest python:3.12-slim | gzip -9 > images.tar.gz
+          ls -lh images.tar.gz
+          sha256sum images.tar.gz > images.tar.gz.sha256
+
+      - name: Upload release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release delete images-2026-10-18 --yes --cleanup-tag || true
+          gh release create images-2026-10-18 images.tar.gz images.tar.gz.sha256 \
+            --title "离线镜像（gopeed + python:3.12-slim）" \
+            --notes "docker load -i images.tar.gz 后即可离线构建 cs-relay。"
