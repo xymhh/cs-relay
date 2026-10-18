@@ -1,16 +1,12 @@
-"""115 上传：p115client 初始化 + p115oss 分片并发，OSS 端点改内网。
+"""115 上传：p115client 建目录 + p115oss.upload_file 分片 PUT（OSS 端点改内网）。
 
-只用 p115client 的 upload_file_init（顺带秒传复核）与目录创建；
-分片 PUT 走 p115oss，端点从公网换成同地域内网（阿里云 ECS 上约 22 MB/s）。
+阿里云深圳 ECS 上走 oss-cn-shenzhen-internal 端点，实测约 22 MB/s。
 """
 
 from __future__ import annotations
 
-import contextlib
-import math
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -23,15 +19,9 @@ except ImportError:  # pragma: no cover
         return response
 
 try:  # pragma: no cover
-    from p115oss import (
-        oss_multipart_upload_cancel,
-        oss_multipart_upload_complete,
-        oss_multipart_upload_init,
-        oss_multipart_upload_part,
-    )
+    from p115oss import upload_file
 except ImportError:  # pragma: no cover
-    oss_multipart_upload_cancel = oss_multipart_upload_complete = None
-    oss_multipart_upload_init = oss_multipart_upload_part = None
+    upload_file = None
 
 
 class P115Error(RuntimeError):
@@ -70,6 +60,14 @@ def _dir_id(response) -> int:
 
 
 class Uploader:
+    """115 上传。
+
+    直接复用 p115oss.upload_file：它内部处理 init（含 sha1 秒传复核、status=1/2
+    两种响应）与分片 PUT，并把端点交给我们换成同地域内网地址。
+    自己拼 init 响应是错的——115 的 status=1 响应把上传配置放在 data 顶层
+    （bucket/object/callback），没有 url 字段。
+    """
+
     def __init__(
             self, cookie: str, concurrency: int = 4,
             part_size: int = 16 * 1024 * 1024,
@@ -102,86 +100,41 @@ class Uploader:
     ) -> dict:
         if not os.path.isfile(local_path):
             raise P115Error(f"本地文件不存在：{local_path}")
+        if upload_file is None:
+            raise P115Error("p115oss 未安装，无法上传")
         size = int(size or os.path.getsize(local_path))
         pid = self.ensure_dir(remote_path)
-        with open(local_path, "rb") as handle:
-            def read_range(sign_check: str, _handle=handle) -> bytes:
-                start, end = (int(part) for part in str(sign_check).split("-"))
-                _handle.seek(start)
-                return _handle.read(end - start + 1)
+        if cancelled and cancelled():
+            raise P115Error("任务已取消")
 
-            init = self.client.upload_file_init(
-                filename=name,
-                filesha1=str(sha1 or "").upper(),
-                filesize=size,
-                pid=pid,
-                read_range_bytes_or_hash=read_range,
-            )
-        check_response(init)
-        if init.get("reuse"):
-            return {"reused": True, "pickcode": str(init.get("pickcode") or "")}
-        data = init.get("data") or {}
-        url = str(data.get("url") or "")
-        callback = data.get("callback")
-        if not url or not callback:
-            raise P115Error(f"115 未返回上传配置：{str(init)[:200]}")
-        if oss_multipart_upload_init is None:
-            raise P115Error("p115oss 未安装，无法分片上传")
-        target = internalize(url, self._internal_endpoint)
-
-        parts_total = max(1, int(math.ceil(size / self._part_size)))
-        upload_id = oss_multipart_upload_init(target)
-        if not upload_id:
-            raise P115Error("115 分块上传初始化失败")
         uploaded = 0
         lock = threading.Lock()
 
-        def report_delta(delta: int) -> None:
+        def reporthook(count: int) -> None:
             nonlocal uploaded
             with lock:
-                uploaded = min(size, uploaded + delta)
+                uploaded = min(size, uploaded + int(count or 0))
                 done = uploaded
             if progress:
                 progress(done, size)
 
-        def put_part(number: int) -> dict:
-            if cancelled and cancelled():
-                raise P115Error("任务已取消")
-            start = (number - 1) * self._part_size
-            length = min(self._part_size, size - start)
-            with open(local_path, "rb") as handle:
-                handle.seek(start)
-                chunk = handle.read(length)
-            if len(chunk) != length:
-                raise P115Error(f"读取第 {number} 片失败：{len(chunk)}/{length}")
-            result = oss_multipart_upload_part(
-                target, upload_id, chunk, part_number=number,
-                reporthook=lambda count: report_delta(int(count or 0)),
-            )
-            return result
-
-        parts: list = []
-        try:
-            with ThreadPoolExecutor(
-                    max_workers=min(self._concurrency, parts_total),
-                    thread_name_prefix="relay-115-part",
-            ) as executor:
-                futures = [executor.submit(put_part, number) for number in range(1, parts_total + 1)]
-                for future in as_completed(futures):
-                    parts.append(future.result())
-            if len(parts) != parts_total:
-                raise P115Error(f"分片数不符：{len(parts)}/{parts_total}")
-            parts.sort(key=lambda part: int(part["PartNumber"]))
-            response = oss_multipart_upload_complete(target, upload_id, parts, callback)
-            check_response(response)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                oss_multipart_upload_cancel(target, upload_id)
-            raise
+        response = upload_file(
+            local_path,
+            pid=pid,
+            filename=name,
+            filesha1=str(sha1 or "").upper(),
+            filesize=size,
+            partsize=self._part_size,
+            endpoint=f"https://{self._internal_endpoint}",
+            reporthook=reporthook,
+            headers=dict(self.client.headers),
+        )
+        check_response(response)
+        data = response.get("data") or {}
+        reused = bool(response.get("reuse")) or int(data.get("status") or 0) == 2
         if progress:
             progress(size, size)
         return {
-            "reused": False,
-            "pickcode": str(init.get("pickcode") or ""),
-            "parts": parts_total,
+            "reused": reused,
+            "pickcode": str(response.get("pickcode") or data.get("pickcode") or ""),
         }
