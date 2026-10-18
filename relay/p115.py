@@ -59,10 +59,13 @@ def _dir_id(response) -> int:
     if not isinstance(response, dict):
         raise P115Error("115 目录接口返回异常")
     data = response.get("data")
-    if isinstance(data, dict) and data.get("id") not in (None, ""):
-        return int(data["id"])
-    if response.get("id") not in (None, ""):
-        return int(response["id"])
+    if isinstance(data, dict):
+        for key in ("id", "file_id", "cid"):
+            if data.get(key) not in (None, ""):
+                return int(data[key])
+    for key in ("id", "file_id", "cid"):
+        if response.get(key) not in (None, ""):
+            return int(response[key])
     raise P115Error(f"115 目录 id 解析失败：{str(response)[:200]}")
 
 
