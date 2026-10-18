@@ -77,6 +77,12 @@ class JobManager:
             raise ValueError("file_name 不能为空")
         file_id = str(payload.get("file_id") or "").strip()
         source_url = str(payload.get("source_url") or "").strip()
+        # 每个任务可自带线程数：0/缺省＝用中继自己的配置（GOPEED_CONNECTIONS）
+        try:
+            job_connections = int(payload.get("connections") or 0)
+        except (TypeError, ValueError):
+            job_connections = 0
+        job_connections = job_connections if 1 <= job_connections <= 128 else 0
         if not file_id and not source_url:
             logbuf.log(
                 f"[jobs] 提交被拒：file_id/source_url 均为空（file_name={name} size={size}）"
@@ -102,6 +108,7 @@ class JobManager:
                 "file_name": name,
                 "size": size,
                 "sha1": str(payload.get("sha1") or "").upper(),
+                "connections": job_connections,
                 "target": {
                     "path": str(target.get("path") or "/"),
                     "name": str(target.get("name") or name),
@@ -209,12 +216,19 @@ class JobManager:
         size = int(payload["size"])
         sha1 = payload["sha1"]
         source_url = str(payload.get("source_url") or "").strip()
+        # 任务自带线程优先，缺省/非法时回落中继配置
+        job_connections = int(payload.get("connections") or 0)
+        connections = (
+            job_connections if 1 <= job_connections <= 128
+            else int(self.config.gopeed_connections or 8)
+        )
         job_dir = Path(self.config.spend_dir) / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         gopeed_task = ""
         started = _now()
         logbuf.log(
             f"[job] {job_id} 开始：{name} {size} 字节 -> {payload['target']['path']}"
+            f"（线程={connections}{'，任务指定' if 1 <= job_connections <= 128 else '，中继默认'}）"
         )
         self._update(
             job_id, status="running", phase="resolve", progress=2,
@@ -271,7 +285,7 @@ class JobManager:
             if engine == "gopeed":
                 gopeed = self._gopeed_factory()
                 gopeed_task = gopeed.create_task(
-                    url, headers, str(job_dir), name, connections=self.config.gopeed_connections,
+                    url, headers, str(job_dir), name, connections=connections,
                 )
                 gopeed.wait(
                     gopeed_task, timeout=self.config.job_timeout,
@@ -284,7 +298,7 @@ class JobManager:
                     url, headers, local_path, size,
                     progress=on_download,
                     cancelled=lambda: self._is_cancelled(job_id),
-                    connections=min(int(self.config.gopeed_connections or 8), 16),
+                    connections=min(connections, 32),
                     timeout=120.0,
                 )
             if not local_path.is_file():

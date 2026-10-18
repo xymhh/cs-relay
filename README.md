@@ -32,6 +32,11 @@ Range 分片（8–16 并发），请求头（cookie/UA/Referer）完全由中�
 对照接口：`POST /debug/gopeed/install-quark`（手动重装扩展+写 cookie）、
 `GET|POST /debug/gopeed/proxy`（透传 `/api/v1/*`，用于远程查扩展列表与设置）。
 
+下载线程数（0.6.2 起）：`POST /jobs` 的请求体可带 `"connections": N`（1–128），
+该任务就用 N 条连接下载（Gopeed 腿写进 `opts.extra.connections`，内置腿上限 32）；
+缺省或非法值＝用中继自己的 `GOPEED_CONNECTIONS`（默认 64）。
+任务开始时日志会打 `（线程=N，任务指定/中继默认）`。
+
 内置引擎行为：先 `Range: bytes=0-0` 探总大小与分段能力 → 按 8 MB 分片并发拉取 →
 `os.pwrite` 按偏移写入 → 校验总大小与 SHA1；403/404 会直接抛成「直链返回 403（cookie 失效或请求头不够）」
 这类可读错误，而不是一句 `status=error`。

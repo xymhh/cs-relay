@@ -37,8 +37,10 @@ class FakeGopeed:
         self.payload = payload
         self.fail = fail
         self.deleted = []
+        self.connections = []
 
     def create_task(self, url, headers, path, name, connections=0):
+        self.connections.append(connections)
         if self.fail:
             raise GopeedError("boom")
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -135,6 +137,32 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(uploader.calls[0]["remote"], "/整理/待整理")
         self.assertEqual(gopeed.deleted, ["task-1"])
         self.assertFalse((self.cfg.spend_dir / job["id"]).exists())
+
+    def test_job_connections_override_and_default(self):
+        gopeed = FakeGopeed(self.payload)
+        manager = JobManager(
+            self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {}),
+            gopeed_factory=lambda: gopeed, uploader_factory=FakeUploader,
+        )
+        base = {
+            "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
+            "size": len(self.payload), "sha1": self.sha1,
+            "target": {"path": "/x", "name": "a.mkv"},
+        }
+        job = manager.submit(dict(base, connections=12))
+        self.assertEqual(job["payload"]["connections"], 12)
+        self._wait(manager, job["id"])
+        self.assertEqual(gopeed.connections, [12])
+
+        job2 = manager.submit(dict(base))
+        self.assertEqual(job2["payload"]["connections"], 0)
+        self._wait(manager, job2["id"])
+        self.assertEqual(gopeed.connections[-1], self.cfg.gopeed_connections)
+
+        # 非法值（负数/超范围）按中继默认处理
+        job3 = manager.submit(dict(base, connections=999))
+        self._wait(manager, job3["id"])
+        self.assertEqual(gopeed.connections[-1], self.cfg.gopeed_connections)
 
     def test_sha1_mismatch_fails_and_cleans(self):
         gopeed = FakeGopeed(self.payload[:-1])
