@@ -118,6 +118,9 @@ class Uploader:
             if progress:
                 progress(done, size)
 
+        client = self.client
+        headers = {k: v for k, v in dict(client.headers).items()
+                   if k.lower() != "authorization"}
         response = upload_file(
             local_path,
             pid=pid,
@@ -127,7 +130,12 @@ class Uploader:
             partsize=self._part_size,
             endpoint=f"https://{self._internal_endpoint}",
             reporthook=reporthook,
-            headers=dict(self.client.headers),
+            # 给了 user_id/user_key 才走 cookie 那套接口；否则 p115oss 会打 /open/
+            # 接口并要求 authorization: Bearer，cookie 登录的客户端拿不到
+            user_id=client.user_id,
+            user_key=client.user_key,
+            headers=headers,
+            cookies=client.cookies,
         )
         check_response(response)
         data = response.get("data") or {}
