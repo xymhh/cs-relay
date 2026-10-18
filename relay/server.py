@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,10 +25,11 @@ from . import logbuf
 from .config import Config
 from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
+from .p115 import Uploader
 from .quark import QuarkError, load_cookie, resolve_download_link
 from .quarkext import ensure_quark_extension
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -328,6 +330,60 @@ def make_handler(config: Config, manager: JobManager):
                     return _json(self, 502, {"error": str(error)[:400]})
                 logbuf.log(f"[debug] gopeed {method} {target} -> ok")
                 return _json(self, 200, result)
+            if path == "/debug/upload/selftest":
+                # 造一个随机文件走完整上传链路，验证「真实上传」（不命中秒传）
+                try:
+                    payload = self._body()
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)})
+                size_mb = max(1, min(int(payload.get("size_mb") or 200), 2048))
+                target = str(payload.get("path") or "/中继自测").strip() or "/中继自测"
+                name = f"relay-selftest-{int(time.time())}.bin"
+                local = config.data_dir / "selftest" / name
+                local.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with open(local, "wb") as fh:
+                        remaining = size_mb * 1024 * 1024
+                        while remaining > 0:
+                            chunk = os.urandom(min(4 * 1024 * 1024, remaining))
+                            fh.write(chunk)
+                            remaining -= len(chunk)
+                    import hashlib as _hashlib
+                    digest = _hashlib.sha1()
+                    with open(local, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                            digest.update(chunk)
+                    uploader = Uploader(
+                        config.p115_cookie,
+                        concurrency=config.upload_concurrency,
+                        part_size=config.part_size,
+                        internal_endpoint=config.internal_endpoint,
+                    )
+                    started = time.time()
+                    result = uploader.upload(
+                        str(local), target, name,
+                        digest.hexdigest().upper(), local.stat().st_size,
+                    )
+                    elapsed = max(0.1, time.time() - started)
+                    speed = local.stat().st_size / elapsed / 1048576
+                    logbuf.log(
+                        f"[debug] upload selftest {size_mb}MB -> {target}/{name} "
+                        f"{speed:.1f}MB/s"
+                    )
+                    return _json(self, 200, {
+                        "ok": True, "size_mb": size_mb, "path": f"{target}/{name}",
+                        "seconds": round(elapsed, 1), "speed_mbps": round(speed, 1),
+                        "result": result,
+                    })
+                except QuarkError as error:
+                    return _json(self, 400, {"error": str(error)[:300]})
+                except Exception as error:  # noqa: BLE001
+                    return _json(self, 500, {"error": f"{type(error).__name__}: {error}"[:400]})
+                finally:
+                    try:
+                        local.unlink()
+                    except OSError:
+                        pass
             if path == "/debug/quark/probe":
                 # 逐个 header 组合试探直链，定位 412 到底卡在哪一项
                 try:
