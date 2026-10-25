@@ -1,4 +1,4 @@
-"""任务队列：解析直链 -> Gopeed 下载 -> 115 内网上传 -> 校验 -> 清理。
+"""任务队列：解析直链 -> 内置多连接下载 -> 115 内网上传 -> 校验 -> 清理。
 
 串行执行（35 GB 盘，同时只处理一个文件）。任务状态挂在内存里，并周期性
 落盘到 jobs.json，relay 重启后仍能查到最近结果。
@@ -19,7 +19,6 @@ from typing import Any, Callable
 
 from . import downloader, logbuf
 from .config import Config
-from .gopeed import GopeedClient, GopeedError
 from .p115 import P115Error, Uploader
 from .quark import QuarkError, load_cookie, resolve_download_link, save_cookie
 
@@ -33,14 +32,10 @@ class JobManager:
             self,
             config: Config,
             resolver: Callable[[str, str], tuple[str, dict]] = resolve_download_link,
-            gopeed_factory: Callable[[], GopeedClient] | None = None,
             uploader_factory: Callable[[], Uploader] | None = None,
     ):
         self.config = config
         self._resolver = resolver
-        self._gopeed_factory = gopeed_factory or (
-            lambda: GopeedClient(config.gopeed_url, config.gopeed_token)
-        )
         self._uploader_factory = uploader_factory or (
             lambda: Uploader(
                 config.p115_cookie,
@@ -77,7 +72,7 @@ class JobManager:
             raise ValueError("file_name 不能为空")
         file_id = str(payload.get("file_id") or "").strip()
         source_url = str(payload.get("source_url") or "").strip()
-        # 每个任务可自带线程数：0/缺省＝用中继自己的配置（GOPEED_CONNECTIONS）
+        # 每个任务可自带线程数：0/缺省＝用中继自己的配置（RELAY_DOWNLOAD_CONNECTIONS）
         try:
             job_connections = int(payload.get("connections") or 0)
         except (TypeError, ValueError):
@@ -150,9 +145,8 @@ class JobManager:
     def _quark_cookie(self) -> str:
         """用 .env 里的 cookie，并在取链时刷新 __puus。
 
-        Gopeed 夸克扩展里那份 cookie 只有扩展自己跑任务时才会续期，中继拿它
-        取链会拿到签名过期、CDN 一律 412 的直链；.env 那份配合 member 请求
-        滚动刷新 __puus 才是可控的。
+        夸克直链的签名与 cookie 里的 __puus 绑定，过期后 CDN 一律 412。每次
+        取链前用 member 请求滚动刷新 __puus，并把新 cookie 落盘，才是可控的。
         """
         return load_cookie(
             self._state_file.parent / "quark_cookie.txt",
@@ -215,16 +209,14 @@ class JobManager:
         name = payload["file_name"]
         size = int(payload["size"])
         sha1 = payload["sha1"]
-        source_url = str(payload.get("source_url") or "").strip()
         # 任务自带线程优先，缺省/非法时回落中继配置
         job_connections = int(payload.get("connections") or 0)
         connections = (
             job_connections if 1 <= job_connections <= 128
-            else int(self.config.gopeed_connections or 8)
+            else int(self.config.download_connections or 32)
         )
         job_dir = Path(self.config.spend_dir) / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        gopeed_task = ""
         started = _now()
         logbuf.log(
             f"[job] {job_id} 开始：{name} {size} 字节 -> {payload['target']['path']}"
@@ -237,22 +229,13 @@ class JobManager:
         try:
             if payload["provider"] != "quark":
                 raise ValueError(f"暂不支持源网盘：{payload['provider']}")
-            engine = str(getattr(self.config, "download_engine", "builtin") or "builtin").lower()
-            # 注意：夸克扩展的 list 链接只认「目录 fid」，传单个文件 fid 会立刻
-            # status=error（扩展按目录 file/sort 列表，文件 fid 不是目录）。
-            # 所以单文件仍由中继解析直链，Gopeed 只当多连接下载器用。
-            if source_url and engine == "gopeed" and "/s/" in source_url:
-                # 交给 Gopeed 的夸克扩展解析：中继不碰直链，扩展自己带 cookie
-                url, headers = source_url, {}
-                logbuf.log(f"[job] {job_id} 交给扩展解析：{source_url.split('?')[0][:120]}")
-            else:
-                url, headers = self._resolver(self._quark_cookie(), payload["file_id"])
-                save_cookie(
-                    self._state_file.parent / "quark_cookie.txt",
-                    str(headers.get("cookie") or ""),
-                )
-            # 只打域名和请求头键名（绝不打 cookie/直链令牌），用于判断
-            # Gopeed 拿到的到底是什么；403 时靠这一行区分「没带 cookie」还是「链接失效」
+            url, headers = self._resolver(self._quark_cookie(), payload["file_id"])
+            save_cookie(
+                self._state_file.parent / "quark_cookie.txt",
+                str(headers.get("cookie") or ""),
+            )
+            # 只打域名和请求头键名（绝不打 cookie/直链令牌）；
+            # 403 时靠这一行区分「没带 cookie」还是「链接失效」
             host = ""
             try:
                 host = url.split("/")[2]
@@ -262,11 +245,10 @@ class JobManager:
                 f"[job] {job_id} 直链 host={host} header_keys={sorted(headers)}"
             )
             if self._is_cancelled(job_id):
-                raise GopeedError("任务已取消")
+                raise downloader.DownloadError("任务已取消")
             self._update(
                 job_id, phase="download", progress=5,
-                message=("正在下载源文件（内置多连接）" if engine == "builtin"
-                         else "正在下载源文件（Gopeed 多连接）"),
+                message="正在下载源文件（内置多连接）",
             )
             local_path = job_dir / name
             last = {"bytes": 0, "at": time.monotonic()}
@@ -282,34 +264,23 @@ class JobManager:
                     speed=speed,
                 )
 
-            if engine == "gopeed":
-                gopeed = self._gopeed_factory()
-                gopeed_task = gopeed.create_task(
-                    url, headers, str(job_dir), name, connections=connections,
-                )
-                gopeed.wait(
-                    gopeed_task, timeout=self.config.job_timeout,
-                    on_progress=on_download,
-                    cancelled=lambda: self._is_cancelled(job_id),
-                )
-            else:
-                # 内置下载腿：自己带 cookie/UA/Referer，不依赖 Gopeed 扩展
-                downloader.download(
-                    url, headers, local_path, size,
-                    progress=on_download,
-                    cancelled=lambda: self._is_cancelled(job_id),
-                    connections=min(connections, 32),
-                    timeout=120.0,
-                )
+            downloader.download(
+                url, headers, local_path, size,
+                progress=on_download,
+                cancelled=lambda: self._is_cancelled(job_id),
+                connections=connections,
+                chunk_size=self.config.download_chunk_bytes,
+                timeout=120.0,
+            )
             if not local_path.is_file():
                 raise downloader.DownloadError(f"下载完成但文件不存在：{local_path}")
             actual_size = local_path.stat().st_size
             if size and actual_size != size:
-                raise GopeedError(f"下载大小不符：{actual_size}/{size}")
+                raise downloader.DownloadError(f"下载大小不符：{actual_size}/{size}")
             if not sha1:
                 sha1 = self._sha1(local_path)
             elif self._sha1(local_path) != sha1:
-                raise GopeedError("下载后 SHA1 校验失败")
+                raise downloader.DownloadError("下载后 SHA1 校验失败")
             self._update(
                 job_id, phase="upload", progress=95,
                 message="正在上传到 115（内网端点）",
@@ -338,7 +309,7 @@ class JobManager:
                 },
                 finished_at=_now(),
             )
-        except (QuarkError, GopeedError, downloader.DownloadError, P115Error, ValueError, OSError) as error:
+        except (QuarkError, downloader.DownloadError, P115Error, ValueError, OSError) as error:
             logbuf.log(f"[job] {job_id} 失败：{str(error)[:300]}")
             cancelled = self._is_cancelled(job_id)
             self._update(
@@ -350,11 +321,6 @@ class JobManager:
                 finished_at=_now(),
             )
         finally:
-            if gopeed_task:
-                try:
-                    self._gopeed_factory().delete_task(gopeed_task, force=True)
-                except Exception:  # noqa: BLE001 - 清理失败不影响任务结论
-                    pass
             shutil.rmtree(job_dir, ignore_errors=True)
 
     @staticmethod

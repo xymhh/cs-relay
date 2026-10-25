@@ -21,15 +21,13 @@ from pathlib import Path
 import hashlib
 import requests
 
-from . import logbuf
+from . import downloader, logbuf
 from .config import Config
-from .gopeed import GopeedClient, GopeedError
 from .jobs import JobManager
 from .p115 import Uploader
 from .quark import QuarkError, load_cookie, resolve_download_link
-from .quarkext import ensure_quark_extension
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -58,10 +56,9 @@ def _debug_status(config: Config, manager: JobManager) -> dict:
         "disk_free_gb": round(usage.free / 1024 ** 3, 1),
         "disk_total_gb": round(usage.total / 1024 ** 3, 1),
         "config": {
-            "gopeed_url": config.gopeed_url,
-            "gopeed_token_configured": bool(config.gopeed_token),
-            "gopeed_connections": config.gopeed_connections,
-            "download_engine": config.download_engine,
+            "download_engine": "builtin",
+            "download_connections": config.download_connections,
+            "download_chunk_mb": round(config.download_chunk_bytes / 1048576, 1),
             "quark_cookie_configured": bool(config.quark_cookie),
             "p115_cookie_configured": bool(config.p115_cookie),
             "max_file_bytes": config.max_file_bytes,
@@ -86,6 +83,55 @@ def _debug_status(config: Config, manager: JobManager) -> dict:
     }
 
 
+def _debug_download(config: Config, payload: dict) -> dict:
+    """用真实 file_id 跑一次内置多连接下载，N 秒后回报实测速度。
+
+    直链来自中继自己的 cookie，与真实任务完全同一条路径；按秒数截断，
+    文件随即删除，不占盘。
+    """
+    file_id = str(payload.get("file_id") or "").strip()
+    if not file_id:
+        raise ValueError("file_id 不能为空")
+    seconds = max(1, min(int(payload.get("seconds") or 8), 60))
+    connections = max(
+        1, min(int(payload.get("connections") or config.download_connections), 128)
+    )
+    url, headers = resolve_download_link(config.quark_cookie, file_id)
+    Path(config.spend_dir).mkdir(parents=True, exist_ok=True)
+    target = Path(config.spend_dir) / f"probe-{int(time.time())}.bin"
+    started = time.monotonic()
+    state = {"done": 0}
+
+    def on_progress(done: int, total: int) -> None:
+        state["done"] = int(done)
+
+    error = ""
+    try:
+        downloader.download(
+            url, headers, target, 0,
+            progress=on_progress,
+            cancelled=lambda: time.monotonic() - started >= seconds,
+            connections=connections,
+            chunk_size=config.download_chunk_bytes,
+            timeout=60.0,
+            retries=1,
+        )
+    except downloader.DownloadError as exc:
+        error = str(exc)[:300]
+    elapsed = max(0.001, time.monotonic() - started)
+    downloaded = int(state["done"])
+    target.unlink(missing_ok=True)
+    return {
+        "file_id": file_id,
+        "seconds": round(elapsed, 2),
+        "connections": connections,
+        "chunk_mb": round(config.download_chunk_bytes / 1048576, 1),
+        "bytes": downloaded,
+        "mbps": round(downloaded / elapsed / 1048576, 2),
+        "error": "" if "取消" in error else error,
+    }
+
+
 def _debug_selfcheck(config: Config) -> dict:
     checks: dict = {}
 
@@ -103,21 +149,17 @@ def _debug_selfcheck(config: Config) -> dict:
     except OSError as error:
         checks["disk"] = {"ok": False, "error": str(error)[:300]}
 
-    # 2) Gopeed：读 /api/v1/info（不创建任务）
-    try:
-        info = GopeedClient(config.gopeed_url, config.gopeed_token).info()
-        checks["gopeed"] = {"ok": True, "info": info}
-    except GopeedError as error:
-        checks["gopeed"] = {"ok": False, "error": str(error)[:300]}
-
-    # 3) 凭证是否配置（只报有无，不回报内容）
-    # 4) 当前下载腿引擎（builtin 不需要 Gopeed）
-    checks["download_engine"] = {"ok": True, "engine": config.download_engine}
-
+    # 2) 凭证是否配置（只报有无，不回报内容）
     checks["credentials"] = {
         "quark_cookie": bool(config.quark_cookie),
         "p115_cookie": bool(config.p115_cookie),
-        "gopeed_token": bool(config.gopeed_token),
+    }
+    # 3) 下载腿：只有内置多连接一种
+    checks["download_engine"] = {
+        "ok": True,
+        "engine": "builtin",
+        "connections": config.download_connections,
+        "chunk_mb": round(config.download_chunk_bytes / 1048576, 1),
     }
     return {"ok": all(bool(v.get("ok")) for k, v in checks.items() if isinstance(v, dict)),
             "version": VERSION, "checks": checks}
@@ -217,119 +259,25 @@ def make_handler(config: Config, manager: JobManager):
                 return _json(self, 200, {"lines": logbuf.tail(lines)})
             if path == "/debug/selfcheck":
                 return _json(self, 200, _debug_selfcheck(config))
-            if path == "/debug/gopeed/test":
-                # 用真实 file_id 走一遍「中继解析直链 → Gopeed 多连接下载」，
-                # 8 秒后回报 status/速度/错误原文，测完删任务避免占盘。
+            if path == "/debug/download":
                 try:
                     payload = self._body()
                 except ValueError as error:
                     return _json(self, 400, {"error": str(error)})
-                file_id = str(payload.get("file_id") or "").strip()
-                if not file_id:
-                    return _json(self, 400, {"error": "file_id 不能为空"})
                 try:
-                    gopeed = GopeedClient(config.gopeed_url, config.gopeed_token)
-                    cookie = config.quark_cookie
-                    try:
-                        listing = gopeed.request("GET", "/api/v1/extensions")
-                        for ext in listing.get("data") or []:
-                            if "quark" not in str(ext.get("name") or "").lower():
-                                continue
-                            identity = str(ext.get("identity") or "")
-                            if not identity:
-                                continue
-                            detail = gopeed.request(
-                                "GET", f"/api/v1/extensions/{identity}"
-                            )
-                            for item in (detail.get("data") or {}).get("settings") or []:
-                                if item.get("name") == "cookie" and item.get("value"):
-                                    cookie = str(item["value"])
-                                    break
-                    except GopeedError:
-                        pass
-                    url, headers = resolve_download_link(cookie, file_id)
-                    task_id = gopeed.create_task(
-                        url, headers, "/data/gopeed-test",
-                        str(payload.get("name") or "probe.bin"),
-                        connections=min(config.gopeed_connections or 8, 16),
-                    )
-                except (QuarkError, GopeedError) as error:
+                    return _json(self, 200, _debug_download(config, payload))
+                except ValueError as error:
+                    return _json(self, 400, {"error": str(error)[:400]})
+                except (QuarkError, downloader.DownloadError) as error:
                     return _json(self, 502, {"error": str(error)[:400]})
-                time.sleep(8)
-                try:
-                    task = gopeed.get_task(task_id)
-                except GopeedError as error:
-                    task = {"error": str(error)[:300]}
-                progress = task.get("progress") if isinstance(task.get("progress"), dict) else {}
-                result = {
-                    "task": task_id,
-                    "status": task.get("status"),
-                    "downloaded": progress.get("downloaded"),
-                    "length": progress.get("length"),
-                    "error": str(task.get("error") or "")[:300],
-                }
-                try:
-                    gopeed.delete_task(task_id, force=True)
-                except GopeedError:
-                    pass
-                return _json(self, 200, result)
-            if path == "/debug/gopeed/install-quark":
-                status = ensure_quark_extension(
-                    GopeedClient(config.gopeed_url, config.gopeed_token),
-                    config.data_dir, config.quark_cookie, logbuf.log,
-                )
-                return _json(self, 200 if status.get("ok") else 502, status)
-            if path == "/debug/gopeed/proxy":
-                target = self._query("path", "")
-                if not target.startswith("/api/v1/"):
-                    return _json(self, 400, {"error": "path 必须以 /api/v1/ 开头"})
-                try:
-                    payload = GopeedClient(
-                        config.gopeed_url, config.gopeed_token
-                    ).request("GET", target)
-                except GopeedError as error:
-                    return _json(self, 502, {"error": str(error)[:400]})
-                return _json(self, 200, payload)
             return _json(self, 404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if not self._authorized():
                 return _json(self, 401, {"error": "unauthorized"})
-            if path == "/debug/gopeed/test":
-                # 实现在 do_GET 分支；curl -d 默认 POST，这里转发
+            if path == "/debug/download":
                 return self.do_GET()
-            if path == "/jobs":
-                try:
-                    payload = self._body()
-                    job = manager.submit(payload)
-                except ValueError as error:
-                    logbuf.log(f"[jobs] 400：{error}")
-                    return _json(self, 400, {"error": str(error)})
-                except Exception as error:  # noqa: BLE001
-                    return _json(self, 500, {"error": str(error)[:300]})
-                return _json(self, 202, job)
-            if path == "/debug/gopeed/proxy":
-                # 透传到 Gopeed 的 /api/v1/*：用于远程安装夸克扩展、写扩展设置
-                try:
-                    payload = self._body()
-                except ValueError as error:
-                    return _json(self, 400, {"error": str(error)})
-                target = str(payload.get("path") or "")
-                method = str(payload.get("method") or "POST").upper()
-                body = payload.get("body") or None
-                if not target.startswith("/api/v1/"):
-                    return _json(self, 400, {"error": "path 必须以 /api/v1/ 开头"})
-                if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-                    return _json(self, 400, {"error": "method 不支持"})
-                try:
-                    result = GopeedClient(
-                        config.gopeed_url, config.gopeed_token
-                    ).request(method, target, body if isinstance(body, dict) else None)
-                except GopeedError as error:
-                    return _json(self, 502, {"error": str(error)[:400]})
-                logbuf.log(f"[debug] gopeed {method} {target} -> ok")
-                return _json(self, 200, result)
             if path == "/debug/upload/selftest":
                 # 造一个随机文件走完整上传链路，验证「真实上传」（不命中秒传）
                 try:

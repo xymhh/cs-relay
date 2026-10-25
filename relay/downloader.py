@@ -11,6 +11,9 @@
 - 用 `os.pwrite` 按偏移写入同一个文件描述符，避免多线程 seek 竞争；
 - 任一分片失败按次数重试，仍失败则整体报错并清理；
 - 全程支持取消（`cancelled()`）与进度回调。
+
+这是中继唯一的下载腿（0.7.0 起移除了 Gopeed）：夸克直链支持 Range，
+32 个并发分片足以跑满国内到夸克的带宽，且请求头完全可控。
 """
 
 from __future__ import annotations
@@ -143,7 +146,7 @@ def download(
 ) -> int:
     """多连接下载到 target，返回实际字节数。失败抛 DownloadError。"""
     cancelled = cancelled or (lambda: False)
-    connections = max(1, min(int(connections or 8), 32))
+    connections = max(1, min(int(connections or 8), 128))
     probe_timeout = min(timeout, 30.0)
     total, ranged = _probe(url, headers, probe_timeout)
     if not total:

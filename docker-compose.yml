@@ -1,7 +1,7 @@
 services:
   relay:
     build: .
-    image: cs-relay:0.6.2
+    image: cs-relay:0.7.0
     container_name: cs-relay
     restart: unless-stopped
     env_file:
@@ -10,33 +10,6 @@ services:
       - "8787:8787"
     volumes:
       - ./data:/data
-    depends_on:
-      - gopeed
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  gopeed:
-    image: liwei2633/gopeed:latest
-    container_name: gopeed
-    restart: unless-stopped
-    environment:
-      PUID: 0
-      PGID: 0
-      UMASK: "022"
-      GOPEED_USERNAME: ${GOPEED_USERNAME:-xymhh}
-      GOPEED_PASSWORD: ${GOPEED_PASSWORD:?set GOPEED_PASSWORD in .env}
-      GOPEED_APITOKEN: ${GOPEED_APITOKEN:?set GOPEED_APITOKEN in .env}
-      GOPEED_STORAGEDIR: /app/storage
-    volumes:
-      - ./downloads:/app/Downloads
-      - ./storage:/app/storage
-      # 中继把任务下载目录定在 /data/downloads/<job>，必须共享同一路径
-      - ./data:/data
-    ports:
-      - "9999:9999"
     logging:
       driver: json-file
       options:

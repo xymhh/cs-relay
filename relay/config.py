@@ -32,20 +32,11 @@ def _bool(value: object) -> bool:
     return str(value or "").strip().lower() not in {"0", "false", "no", "off", ""}
 
 
-def _engine(value: object) -> str:
-    """下载腿引擎：builtin（默认，自带 cookie/UA/Referer，不依赖 Gopeed 扩展）或 gopeed。"""
-    text = str(value or "builtin").strip().lower()
-    return text if text in {"builtin", "gopeed"} else "builtin"
-
-
 @dataclass(frozen=True)
 class Config:
     token: str
     quark_cookie: str
     p115_cookie: str
-    gopeed_url: str
-    gopeed_token: str
-    gopeed_connections: int
     data_dir: Path
     spend_dir: Path
     upload_concurrency: int
@@ -53,8 +44,8 @@ class Config:
     max_file_bytes: int
     internal_endpoint: str
     job_timeout: int
-    download_engine: str = "builtin"
-    quark_ext_auto: bool = True
+    download_connections: int = 32
+    download_chunk_bytes: int = 8 * 1024 * 1024
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Config":
@@ -65,9 +56,6 @@ class Config:
             token=str(env.get("RELAY_TOKEN") or "").strip(),
             quark_cookie=_read_secret(env, "QUARK_COOKIE", "QUARK_COOKIE_FILE"),
             p115_cookie=_read_secret(env, "P115_COOKIE", "P115_COOKIE_FILE"),
-            gopeed_url=str(env.get("GOPEED_URL") or "http://gopeed:9999").strip().rstrip("/"),
-            gopeed_token=str(env.get("GOPEED_TOKEN") or "").strip(),
-            gopeed_connections=_int(env.get("GOPEED_CONNECTIONS", "64"), 64, 0, 512),
             data_dir=data_dir,
             spend_dir=data_dir / "downloads",
             upload_concurrency=_int(env.get("P115_UPLOAD_CONCURRENCY", "4"), 4, 1, 16),
@@ -78,8 +66,12 @@ class Config:
                 or "oss-cn-shenzhen-internal.aliyuncs.com"
             ).strip(),
             job_timeout=_int(env.get("RELAY_JOB_TIMEOUT_SECONDS", "10800"), 10800, 60, 86400),
-            download_engine=_engine(env.get("RELAY_DOWNLOAD_ENGINE")),
-            quark_ext_auto=_bool(env.get("QUARK_EXT_AUTO", "1")),
+            download_connections=_int(
+                env.get("RELAY_DOWNLOAD_CONNECTIONS", "32"), 32, 1, 128
+            ),
+            download_chunk_bytes=_int(
+                env.get("RELAY_DOWNLOAD_CHUNK_MB", "8"), 8, 1, 64
+            ) * 1024 * 1024,
         )
 
     def validate(self) -> list[str]:

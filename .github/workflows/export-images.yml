@@ -15,9 +15,8 @@ jobs:
       - name: Pull and save
         run: |
           set -euo pipefail
-          docker pull liwei2633/gopeed:latest
           docker pull python:3.12-slim
-          docker save liwei2633/gopeed:latest python:3.12-slim | gzip -9 > images.tar.gz
+          docker save python:3.12-slim | gzip -9 > images.tar.gz
           ls -lh images.tar.gz
           sha256sum images.tar.gz > images.tar.gz.sha256
 
@@ -28,5 +27,5 @@ jobs:
           set -euo pipefail
           gh release delete images-2026-10-18 --yes --cleanup-tag || true
           gh release create images-2026-10-18 images.tar.gz images.tar.gz.sha256 \
-            --title "离线镜像（gopeed + python:3.12-slim）" \
-            --notes "docker load -i images.tar.gz 后即可离线构建 cs-relay。"
+            --title "离线镜像（python:3.12-slim）" \
+            --notes "docker load -i images.tar.gz 后即可离线构建 cs-relay（0.7.0 起只需 python:3.12-slim）。"

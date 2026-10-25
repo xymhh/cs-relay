@@ -1,14 +1,14 @@
 import hashlib
 import json
-import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from relay import downloader
 from relay.config import Config
-from relay.gopeed import GopeedError
 from relay.jobs import JobManager
 from relay.p115 import internalize
 
@@ -18,9 +18,6 @@ def make_config(tmp: Path) -> Config:
         token="t0ken",
         quark_cookie="quark=1",
         p115_cookie="uid=1",
-        gopeed_url="http://gopeed:9999",
-        gopeed_token="",
-        gopeed_connections=64,
         data_dir=tmp,
         spend_dir=tmp / "downloads",
         upload_concurrency=2,
@@ -28,32 +25,32 @@ def make_config(tmp: Path) -> Config:
         max_file_bytes=25 * 1024 ** 3,
         internal_endpoint="oss-cn-shenzhen-internal.aliyuncs.com",
         job_timeout=60,
-        download_engine="gopeed",
+        download_connections=32,
+        download_chunk_bytes=8 * 1024 * 1024,
     )
 
 
-class FakeGopeed:
+class FakeDownloader:
+    """替身：按 payload 写文件，记录每次调用的连接数。"""
+
     def __init__(self, payload: bytes, fail: bool = False):
         self.payload = payload
         self.fail = fail
-        self.deleted = []
         self.connections = []
+        self.chunks = []
 
-    def create_task(self, url, headers, path, name, connections=0):
+    def __call__(self, url, headers, target, size, progress=None, cancelled=None,
+                 connections=8, chunk_size=None, timeout=60.0, retries=2):
         self.connections.append(connections)
+        self.chunks.append(chunk_size)
         if self.fail:
-            raise GopeedError("boom")
-        Path(path).mkdir(parents=True, exist_ok=True)
-        (Path(path) / name).write_bytes(self.payload)
-        return "task-1"
-
-    def wait(self, task_id, timeout, on_progress=None, cancelled=None):
-        if on_progress:
-            on_progress(len(self.payload), len(self.payload))
-        return {"status": "done"}
-
-    def delete_task(self, task_id, force=True):
-        self.deleted.append(task_id)
+            raise downloader.DownloadError("boom")
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.payload)
+        if progress:
+            progress(len(self.payload), len(self.payload))
+        return len(self.payload)
 
 
 class FakeUploader:
@@ -84,6 +81,23 @@ class ConfigTest(unittest.TestCase):
         })
         self.assertEqual(cfg.upload_concurrency, 16)
         self.assertEqual(cfg.max_file_bytes, 0)
+
+    def test_download_tuning_defaults_and_clamps(self):
+        cfg = Config.from_env({"RELAY_DATA_DIR": "/tmp/x"})
+        self.assertEqual(cfg.download_connections, 32)
+        self.assertEqual(cfg.download_chunk_bytes, 8 * 1024 * 1024)
+
+        cfg = Config.from_env({
+            "RELAY_DATA_DIR": "/tmp/x",
+            "RELAY_DOWNLOAD_CONNECTIONS": "999",
+            "RELAY_DOWNLOAD_CHUNK_MB": "0",
+        })
+        self.assertEqual(cfg.download_connections, 128)
+        self.assertEqual(cfg.download_chunk_bytes, 1 * 1024 * 1024)
+
+    def test_gopeed_env_is_gone(self):
+        cfg = Config.from_env({"RELAY_DATA_DIR": "/tmp/x", "GOPEED_URL": "http://g:9999"})
+        self.assertFalse(hasattr(cfg, "gopeed_url"))
 
 
 class InternalizeTest(unittest.TestCase):
@@ -118,71 +132,76 @@ class JobManagerTest(unittest.TestCase):
             time.sleep(0.02)
         self.fail("job did not finish")
 
+    def _submit_and_wait(self, fake, payload, uploader=None):
+        uploader = uploader or FakeUploader()
+        with mock.patch("relay.jobs.downloader.download", fake):
+            manager = JobManager(
+                self.cfg,
+                resolver=lambda cookie, fid: ("http://quark/x", {"ua": "q"}),
+                uploader_factory=lambda: uploader,
+            )
+            job = manager.submit(payload)
+            return self._wait(manager, job["id"]), job, manager
+
     def test_success_flow(self):
-        gopeed = FakeGopeed(self.payload)
         uploader = FakeUploader()
-        manager = JobManager(
-            self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {"ua": "q"}),
-            gopeed_factory=lambda: gopeed, uploader_factory=lambda: uploader,
-        )
-        job = manager.submit({
+        fake = FakeDownloader(self.payload)
+        done, job, _ = self._submit_and_wait(fake, {
             "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
             "size": len(self.payload), "sha1": self.sha1,
             "target": {"path": "/整理/待整理", "name": "a.mkv"},
-        })
-        done = self._wait(manager, job["id"])
+        }, uploader=uploader)
         self.assertEqual(done["status"], "success")
         self.assertEqual(done["result"]["sha1"], self.sha1)
         self.assertEqual(done["result"]["pickcode"], "pc123")
         self.assertEqual(uploader.calls[0]["remote"], "/整理/待整理")
-        self.assertEqual(gopeed.deleted, ["task-1"])
+        self.assertEqual(fake.connections, [32])
+        self.assertEqual(fake.chunks, [self.cfg.download_chunk_bytes])
         self.assertFalse((self.cfg.spend_dir / job["id"]).exists())
 
     def test_job_connections_override_and_default(self):
-        gopeed = FakeGopeed(self.payload)
-        manager = JobManager(
-            self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {}),
-            gopeed_factory=lambda: gopeed, uploader_factory=FakeUploader,
-        )
+        fake = FakeDownloader(self.payload)
         base = {
             "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
             "size": len(self.payload), "sha1": self.sha1,
             "target": {"path": "/x", "name": "a.mkv"},
         }
-        job = manager.submit(dict(base, connections=12))
+        done, job, _ = self._submit_and_wait(fake, dict(base, connections=12))
         self.assertEqual(job["payload"]["connections"], 12)
-        self._wait(manager, job["id"])
-        self.assertEqual(gopeed.connections, [12])
+        self.assertEqual(fake.connections[-1], 12)
 
-        job2 = manager.submit(dict(base))
+        done, job2, _ = self._submit_and_wait(fake, dict(base))
         self.assertEqual(job2["payload"]["connections"], 0)
-        self._wait(manager, job2["id"])
-        self.assertEqual(gopeed.connections[-1], self.cfg.gopeed_connections)
+        self.assertEqual(fake.connections[-1], self.cfg.download_connections)
 
-        # 非法值（负数/超范围）按中继默认处理
-        job3 = manager.submit(dict(base, connections=999))
-        self._wait(manager, job3["id"])
-        self.assertEqual(gopeed.connections[-1], self.cfg.gopeed_connections)
+        # 非法值（超范围）按中继默认处理
+        done, job3, _ = self._submit_and_wait(fake, dict(base, connections=999))
+        self.assertEqual(fake.connections[-1], self.cfg.download_connections)
 
     def test_sha1_mismatch_fails_and_cleans(self):
-        gopeed = FakeGopeed(self.payload[:-1])
-        manager = JobManager(
-            self.cfg, resolver=lambda cookie, fid: ("http://quark/x", {}),
-            gopeed_factory=lambda: gopeed, uploader_factory=FakeUploader,
-        )
-        job = manager.submit({
+        fake = FakeDownloader(self.payload[:-1])
+        done, job, _ = self._submit_and_wait(fake, {
             "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
             "size": len(self.payload), "sha1": self.sha1,
             "target": {"path": "/x", "name": "a.mkv"},
         })
-        done = self._wait(manager, job["id"])
         self.assertEqual(done["status"], "failed")
         self.assertIn("大小不符", done["error"])
+        self.assertFalse((self.cfg.spend_dir / job["id"]).exists())
+
+    def test_download_error_marks_failed(self):
+        fake = FakeDownloader(self.payload, fail=True)
+        done, _, _ = self._submit_and_wait(fake, {
+            "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
+            "size": len(self.payload), "sha1": self.sha1,
+            "target": {"path": "/x", "name": "a.mkv"},
+        })
+        self.assertEqual(done["status"], "failed")
+        self.assertIn("boom", done["error"])
 
     def test_rejects_oversize_and_missing_fields(self):
         manager = JobManager(
-            self.cfg, resolver=lambda *a: ("", {}),
-            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
+            self.cfg, resolver=lambda *a: ("", {}), uploader_factory=FakeUploader,
         )
         with self.assertRaises(ValueError):
             manager.submit({"file_name": "a", "size": 1, "target": {}})
@@ -201,8 +220,7 @@ class ServerTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         cfg = make_config(tmp)
         manager = JobManager(
-            cfg, resolver=lambda *a: ("", {}),
-            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
+            cfg, resolver=lambda *a: ("", {}), uploader_factory=FakeUploader,
         )
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cfg, manager))
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -237,13 +255,8 @@ class DebugApiTest(unittest.TestCase):
 
         self.tmp = Path(tempfile.mkdtemp())
         self.cfg = make_config(self.tmp)
-        # 指向必然连不上的地址，避免自检真的打网络
-        self.cfg = Config(
-            **{**self.cfg.__dict__, "gopeed_url": "http://127.0.0.1:1"}
-        )
         manager = JobManager(
-            self.cfg, resolver=lambda *a: ("", {}),
-            gopeed_factory=FakeGopeed, uploader_factory=FakeUploader,
+            self.cfg, resolver=lambda *a: ("", {}), uploader_factory=FakeUploader,
         )
         logbuf.log("[test] debug api ready")
         self.httpd = ThreadingHTTPServer(
@@ -281,6 +294,8 @@ class DebugApiTest(unittest.TestCase):
         config = payload["config"]
         self.assertTrue(config["quark_cookie_configured"])
         self.assertTrue(config["p115_cookie_configured"])
+        self.assertEqual(config["download_engine"], "builtin")
+        self.assertEqual(config["download_connections"], 32)
         text = json.dumps(payload)
         self.assertNotIn("quark=1", text)
         self.assertNotIn("uid=1", text)
@@ -290,11 +305,15 @@ class DebugApiTest(unittest.TestCase):
         payload = self._get("/debug/logs?lines=50")
         self.assertTrue(any("debug api ready" in line for line in payload["lines"]))
 
-    def test_selfcheck_reports_gopeed_failure_without_raising(self):
+    def test_selfcheck_reports_download_engine(self):
         payload = self._get("/debug/selfcheck")
         self.assertIn("checks", payload)
         self.assertTrue(payload["checks"]["disk"]["ok"])
-        self.assertFalse(payload["checks"]["gopeed"]["ok"])
+        engine = payload["checks"]["download_engine"]
+        self.assertTrue(engine["ok"])
+        self.assertEqual(engine["engine"], "builtin")
+        self.assertEqual(engine["connections"], 32)
+        self.assertNotIn("gopeed", payload["checks"])
 
     def test_resolve_requires_file_id(self):
         import urllib.error
@@ -302,6 +321,20 @@ class DebugApiTest(unittest.TestCase):
 
         request = urllib.request.Request(
             f"{self.base}/debug/resolve", method="POST",
+            data=json.dumps({}).encode(), headers={
+                "X-Token": "t0ken", "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request)
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_debug_download_requires_file_id(self):
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"{self.base}/debug/download", method="POST",
             data=json.dumps({}).encode(), headers={
                 "X-Token": "t0ken", "Content-Type": "application/json",
             },

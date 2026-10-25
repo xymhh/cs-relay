@@ -12,7 +12,7 @@ from urllib.parse import urlparse, urlunparse
 
 try:  # pragma: no cover - 运行镜像内一定存在
     from p115client import P115Client, check_response
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover - 兼容旧解释器下的 SyntaxError
     P115Client = None
 
     def check_response(response):
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
 
 try:  # pragma: no cover
     from p115oss import upload_file
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     upload_file = None
 
 
