@@ -27,7 +27,7 @@ from .jobs import JobManager
 from .p115 import Uploader
 from .quark import QuarkError, load_cookie, resolve_download_link
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -151,6 +151,7 @@ def _debug_selfcheck(config: Config) -> dict:
 
     # 2) 凭证是否配置（只报有无，不回报内容）
     checks["credentials"] = {
+        "ok": bool(config.quark_cookie and config.p115_cookie),
         "quark_cookie": bool(config.quark_cookie),
         "p115_cookie": bool(config.p115_cookie),
     }
