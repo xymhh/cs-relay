@@ -238,6 +238,26 @@ class ServerTest(unittest.TestCase):
             )
             with urllib.request.urlopen(request) as response:
                 self.assertEqual(json.loads(response.read())["jobs"], [])
+
+            # POST /jobs 收单（0.7.0 曾误删该分支，线上直接 404）
+            def post(body: dict):
+                return urllib.request.Request(
+                    f"{base}/jobs", method="POST", data=json.dumps(body).encode(),
+                    headers={"X-Token": "t0ken", "Content-Type": "application/json"},
+                )
+
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(post({"file_name": "a.mkv"}))
+            self.assertEqual(ctx.exception.code, 400)
+
+            with urllib.request.urlopen(post({
+                "provider": "quark", "file_id": "f1", "file_name": "a.mkv",
+                "size": 10, "target": {"path": "/x", "name": "a.mkv"},
+            })) as response:
+                self.assertEqual(response.status, 202)
+                job = json.loads(response.read())
+                self.assertIn("id", job)
+                self.assertEqual(job["payload"]["file_id"], "f1")
         finally:
             httpd.shutdown()
             import shutil

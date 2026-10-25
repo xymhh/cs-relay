@@ -27,7 +27,7 @@ from .jobs import JobManager
 from .p115 import Uploader
 from .quark import QuarkError, load_cookie, resolve_download_link
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -279,6 +279,16 @@ def make_handler(config: Config, manager: JobManager):
                 return _json(self, 401, {"error": "unauthorized"})
             if path == "/debug/download":
                 return self.do_GET()
+            if path == "/jobs":
+                try:
+                    payload = self._body()
+                    job = manager.submit(payload)
+                except ValueError as error:
+                    logbuf.log(f"[jobs] 400：{error}")
+                    return _json(self, 400, {"error": str(error)})
+                except Exception as error:  # noqa: BLE001
+                    return _json(self, 500, {"error": str(error)[:300]})
+                return _json(self, 202, job)
             if path == "/debug/upload/selftest":
                 # 造一个随机文件走完整上传链路，验证「真实上传」（不命中秒传）
                 try:
